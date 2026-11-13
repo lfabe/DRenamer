@@ -1,0 +1,103 @@
+"""Generate PDF fixtures. Requires Pillow, pypdf and fonttools."""
+from io import BytesIO
+from pathlib import Path
+
+from fontTools.pens.qu2cuPen import Qu2CuPen
+from fontTools.pens.svgPathPen import SVGPathPen
+from fontTools.svgLib.path import parse_path
+from fontTools.ttLib import TTFont
+from PIL import Image, ImageDraw, ImageFont
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import DecodedStreamObject, NameObject
+
+FOLDER = Path(__file__).resolve().parent
+FONT = "C:/Windows/Fonts/arial.ttf"
+
+
+def scan():
+    image = Image.new("RGB", (1650, 2340), "white")
+    draw = ImageDraw.Draw(image)
+    left, top, right, bottom = 158, 1868, 1611, 2300
+    draw.rectangle((left, top, right, bottom), outline="black", width=4)
+    draw.line((668, top, 668, bottom), fill="black", width=4)
+    draw.line((668, 1986, right, 1986), fill="black", width=4)
+    draw.line((1218, 1986, 1218, bottom), fill="black", width=4)
+    draw.line((1218, 2143, right, 2143), fill="black", width=4)
+    draw.line((668, 2182, 1218, 2182), fill="black", width=4)
+    font = ImageFont.truetype(FONT, 55)
+    draw.text((780, 1894), "АБВГ.123456.001", font=font, fill="black")
+    draw.text((738, 2010), "Корпус", font=font, fill="black")
+    draw.text((738, 2084), "основной", font=font, fill="black")
+    image.save(FOLDER / "scan-form1.pdf", resolution=200)
+
+
+class PdfPen:
+    def __init__(self, output):
+        self.output = output
+
+    def emit(self, operator, *points):
+        coordinates = " ".join(f"{value:.3f}" for point in points for value in point)
+        self.output.append(f"{coordinates} {operator}".strip())
+
+    def moveTo(self, point):
+        self.emit("m", point)
+
+    def lineTo(self, point):
+        self.emit("l", point)
+
+    def curveTo(self, *points):
+        self.emit("c", *points)
+
+    def closePath(self):
+        self.emit("h")
+
+    def endPath(self):
+        pass
+
+
+def outlines():
+    with TTFont(FONT) as font:
+        glyphs = font.getGlyphSet()
+        cmap = font.getBestCmap()
+        scale = 14 / font["head"].unitsPerEm
+        content = [
+            "0.7 w", "55 14 525 156 re S", "239 14 m 239 170 l S",
+            "239 128 m 580 128 l S", "437 14 m 437 128 l S",
+            "437 71 m 580 71 l S", "239 57 m 437 57 l S"
+        ]
+        for value, y in [("ABCD.123456.001", 142), ("Main housing", 98)]:
+            x = 255
+            for character in value:
+                glyph = glyphs[cmap[ord(character)]]
+                path = SVGPathPen(glyphs)
+                glyph.draw(path)
+                if path.getCommands():
+                    content.append(f"q {scale:.9f} 0 0 {scale:.9f} {x:.5f} {y} cm")
+                    parse_path(path.getCommands(), Qu2CuPen(PdfPen(content), max_err=1, all_cubic=True))
+                    content.append("f Q")
+                x += glyph.width * scale
+    writer = PdfWriter()
+    page = writer.add_blank_page(595, 842)
+    stream = DecodedStreamObject()
+    stream.set_data("\n".join(content).encode("ascii"))
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    writer.write(FOLDER / "outline-form1.pdf")
+
+
+def main():
+    scan()
+    source = PdfReader(FOLDER / "scan-form1.pdf")
+    writer = PdfWriter()
+    writer.add_page(source.pages[0]).rotate(90)
+    writer.write(FOLDER / "scan-rotated.pdf")
+    locked = PdfWriter()
+    locked.add_page(source.pages[0])
+    locked.encrypt("fixture-password", algorithm="RC4-128")
+    with BytesIO() as buffer:
+        locked.write(buffer)
+        (FOLDER / "protected.pdf").write_bytes(buffer.getvalue())
+    outlines()
+
+
+if __name__ == "__main__":
+    main()

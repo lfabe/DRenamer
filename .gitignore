@@ -1,0 +1,50 @@
+# Сборка и локальный кэш
+bin/
+obj/
+.packages/
+artifacts/
+TestResults/
+*.binlog
+*.trx
+*.nupkg
+*.snupkg
+
+# Настройки IDE и локальные инструменты
+.vs/
+.idea/
+.vscode/
+.agents/
+.codex/
+.aws/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+__pycache__/
+*.pyc
+
+# Локальные данные и архивы
+.env
+.env.*
+*.pfx
+*.p12
+*.key
+*.pem
+*.log
+*.dmp
+*.zip
+*.7z
+*.tgz
+*.tar.gz
+history.json
+history.json.*
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Чертежи пользователей. В Git хранятся только синтетические образцы.
+*.[pP][dD][fF]
+!/tests/fixtures/outline-form1.pdf
+!/tests/fixtures/protected.pdf
+!/tests/fixtures/scan-form1.pdf
+!/tests/fixtures/scan-rotated.pdf

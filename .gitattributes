@@ -1,0 +1,3 @@
+# Preserve PDF cross-reference offsets and OCR model bytes on every platform.
+*.pdf binary
+*.traineddata binary

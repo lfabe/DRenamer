@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/DrawingRenamer.Core/DrawingRenamer.Core.csproj" />
+  <Project Path="src/DrawingRenamer/DrawingRenamer.csproj" />
+  <Project Path="tests/DrawingRenamer.Tests/DrawingRenamer.Tests.csproj" />
+</Solution>
