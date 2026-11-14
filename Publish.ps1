@@ -35,9 +35,7 @@ foreach ($file in $crtFiles) {
 }
 Copy-Item -LiteralPath "$PSScriptRoot/README.md" -Destination $Output -Force
 $docs = New-Item -ItemType Directory -Path (Join-Path $Output 'docs') -Force
-foreach ($file in 'architecture.md', 'testing.md', 'template-example.json') {
-    Copy-Item -LiteralPath "$PSScriptRoot/docs/$file" -Destination $docs.FullName -Force
-}
+Copy-Item -LiteralPath "$PSScriptRoot/docs/template-example.json" -Destination $docs.FullName -Force
 $licenseDocs = New-Item -ItemType Directory -Path (Join-Path $docs.FullName 'licenses') -Force
 Copy-Item -LiteralPath "$PSScriptRoot/docs/licenses/README.md" -Destination $licenseDocs.FullName -Force
 
