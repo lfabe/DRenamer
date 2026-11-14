@@ -36,6 +36,7 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         Title = "Drawing Renamer";
+        AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "DrawingRenamer.ico"));
         AppWindow.Resize(new(1320, 820));
         ViewModel.PropertyChanged += ViewModelChanged;
         ViewModel.AnalyzeCommand.PropertyChanged += (_, _) => UpdateCommands();
