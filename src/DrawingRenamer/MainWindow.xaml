@@ -147,11 +147,19 @@
                         </Grid>
                     </Border>
                     <StackPanel x:Name="RegionControls" Grid.Row="2" Spacing="5" Visibility="Collapsed">
+                        <InfoBar x:Name="ManualRegionsNotice" Severity="Warning" IsClosable="False"
+                                 Title="Нужно уточнить графы" Message="Обведите графы на листе или заполните поля ниже.">
+                            <InfoBar.ActionButton>
+                                <Button x:Name="StartManualRegionsButton" Content="Выделить графы"
+                                        Style="{StaticResource AccentButtonStyle}" Click="StartManualRegions"/>
+                            </InfoBar.ActionButton>
+                        </InfoBar>
                         <StackPanel Orientation="Horizontal" Spacing="6">
-                            <Button Content="Выделить графы" Click="ToggleRegions"/>
+                            <Button x:Name="ToggleRegionsButton" Content="Выделить графы" Click="ToggleRegions"/>
                             <StackPanel x:Name="RegionActions" Orientation="Horizontal" Spacing="5" Visibility="Collapsed">
-                                <Button Content="Обозначение" Click="MarkDesignation"/>
-                                <Button Content="Наименование" Click="MarkName"/>
+                                <ToggleButton x:Name="MarkDesignationButton" Content="Обозначение" Click="MarkDesignation"/>
+                                <ToggleButton x:Name="MarkNameButton" Content="Наименование" Click="MarkName"/>
+                                <ToggleButton x:Name="MarkStampButton" Content="Рамка штампа" Click="MarkStamp"/>
                             </StackPanel>
                         </StackPanel>
                         <StackPanel x:Name="RegionReadActions" Orientation="Horizontal" Spacing="6" Visibility="Collapsed">
@@ -160,8 +168,10 @@
                                 <ComboBoxItem Content="180°"/><ComboBoxItem Content="270°"/>
                             </ComboBox>
                             <Button x:Name="ReadRegionsButton" Content="Прочитать графы" Click="ReadRegions"/>
-                            <TextBlock x:Name="RegionHint" VerticalAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}"/>
+                            <Button x:Name="SaveRegionsButton" Content="Сохранить в JSON" Click="SaveRegions"/>
                         </StackPanel>
+                        <TextBlock x:Name="RegionHint" TextWrapping="Wrap" Visibility="Collapsed"
+                                   Style="{StaticResource CaptionTextBlockStyle}" AutomationProperties.LiveSetting="Polite"/>
                     </StackPanel>
                     <StackPanel x:Name="Editor" Grid.Row="3" Spacing="7" Visibility="Collapsed">
                         <ComboBox x:Name="CandidatePicker" Header="Варианты распознавания" Visibility="Collapsed"

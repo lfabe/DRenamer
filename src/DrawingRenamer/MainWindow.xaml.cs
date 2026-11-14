@@ -24,10 +24,11 @@ public sealed partial class MainWindow : Window
     private int pageCount;
     private Area? designation;
     private Area? name;
+    private Area? stamp;
     private PointD? dragStart;
     private PointD? dragEnd;
-    private bool markingDesignation;
-    private bool marking;
+    private enum RegionTarget { Designation, Name, Stamp }
+    private RegionTarget? marking;
     private bool closing;
     private bool renaming;
     private bool choosingDocuments;
@@ -79,7 +80,9 @@ public sealed partial class MainWindow : Window
         UndoButton.IsEnabled = available;
         Editor.IsHitTestVisible = available;
         Documents.IsEnabled = available;
-        ReadRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
+        ToggleRegionsButton.IsEnabled = StartManualRegionsButton.IsEnabled = available;
+        MarkDesignationButton.IsEnabled = MarkNameButton.IsEnabled = MarkStampButton.IsEnabled = available;
+        ReadRegionsButton.IsEnabled = SaveRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
         EmptyQueue.Visibility = ViewModel.Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -135,7 +138,7 @@ public sealed partial class MainWindow : Window
                 ViewModel.Message = "Шаблоны загружены для следующего анализа.";
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException
             or System.Runtime.InteropServices.COMException)
         {
             ViewModel.Message = $"Не удалось прочитать шаблоны ({ex.GetType().Name}).";
@@ -179,6 +182,7 @@ public sealed partial class MainWindow : Window
             await SelectPageAsync(current?.SelectedCandidate?.Page ?? 1);
         }
         if (e.PropertyName == nameof(DocumentRow.Source)) await SelectPageAsync(page);
+        if (e.PropertyName is nameof(DocumentRow.Designation) or nameof(DocumentRow.DocumentName)) UpdateRegionGuidance();
     }
 
     private void RefreshCandidates()
@@ -209,10 +213,11 @@ public sealed partial class MainWindow : Window
         preview = operation;
         var row = current;
         page = Math.Max(1, number);
-        designation = name = null;
-        marking = false;
+        designation = name = stamp = null;
         dragStart = dragEnd = null;
-        RegionActions.Visibility = RegionReadActions.Visibility = RegionControls.Visibility = Visibility.Collapsed;
+        RegionControls.Visibility = Visibility.Collapsed;
+        ShowRegionActions(false);
+        UpdateCommands();
         PageImage.Source = null;
         Sheet.Width = Sheet.Height = 0;
         Overlays.Children.Clear();
@@ -256,6 +261,7 @@ public sealed partial class MainWindow : Window
             NextButton.IsEnabled = page < pageCount;
             PreviewMessage.Visibility = Visibility.Collapsed;
             RegionControls.Visibility = Visibility.Visible;
+            UpdateRegionGuidance();
             if (row.SelectedCandidate is { } candidate && candidate.Page == page)
                 Orientation.SelectedIndex = candidate.Turn;
             else Orientation.SelectedIndex = 0;
@@ -280,24 +286,65 @@ public sealed partial class MainWindow : Window
     private void ToggleRegions(object sender, RoutedEventArgs e)
     {
         var open = RegionActions.Visibility == Visibility.Collapsed;
-        RegionActions.Visibility = RegionReadActions.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
-        marking = false;
-        RegionHint.Text = "";
+        ShowRegionActions(open);
+        if (!open && ManualRegionsNotice.IsOpen) StartManualRegionsButton.Focus(FocusState.Programmatic);
     }
 
-    private void MarkDesignation(object sender, RoutedEventArgs e) => Mark(true);
-    private void MarkName(object sender, RoutedEventArgs e) => Mark(false);
-
-    private void Mark(bool forDesignation)
+    private void StartManualRegions(object sender, RoutedEventArgs e)
     {
-        marking = true;
-        markingDesignation = forDesignation;
-        RegionHint.Text = "Обведите графу на листе.";
+        if (current is not { } row) return;
+        ShowRegionActions(true);
+        var target = string.IsNullOrWhiteSpace(row.Designation) ? RegionTarget.Designation : RegionTarget.Name;
+        Mark(target);
+        (target == RegionTarget.Designation ? MarkDesignationButton : MarkNameButton).Focus(FocusState.Programmatic);
+    }
+
+    private void ShowRegionActions(bool open)
+    {
+        RegionActions.Visibility = RegionReadActions.Visibility = RegionHint.Visibility =
+            open ? Visibility.Visible : Visibility.Collapsed;
+        ToggleRegionsButton.Content = open ? "Свернуть" : "Выделить графы";
+        Mark(null);
+        UpdateRegionGuidance();
+    }
+
+    private void UpdateRegionGuidance()
+    {
+        var needsFields = current is { Result: { } result } row &&
+            (result.Status == RecognitionStatus.Missing ||
+                result.Candidates is [{ } candidate] &&
+                (string.IsNullOrWhiteSpace(candidate.Designation) || string.IsNullOrWhiteSpace(candidate.Name))) &&
+            (string.IsNullOrWhiteSpace(row.Designation) || string.IsNullOrWhiteSpace(row.DocumentName));
+        ManualRegionsNotice.IsOpen = RegionControls.Visibility == Visibility.Visible &&
+            RegionActions.Visibility == Visibility.Collapsed && needsFields;
+        ToggleRegionsButton.Visibility = ManualRegionsNotice.IsOpen ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void MarkDesignation(object sender, RoutedEventArgs e) =>
+        Mark(MarkDesignationButton.IsChecked == true ? RegionTarget.Designation : null);
+    private void MarkName(object sender, RoutedEventArgs e) =>
+        Mark(MarkNameButton.IsChecked == true ? RegionTarget.Name : null);
+    private void MarkStamp(object sender, RoutedEventArgs e) =>
+        Mark(MarkStampButton.IsChecked == true ? RegionTarget.Stamp : null);
+
+    private void Mark(RegionTarget? target)
+    {
+        marking = target;
+        MarkDesignationButton.IsChecked = target == RegionTarget.Designation;
+        MarkNameButton.IsChecked = target == RegionTarget.Name;
+        MarkStampButton.IsChecked = target == RegionTarget.Stamp;
+        RegionHint.Text = target switch
+        {
+            RegionTarget.Designation => "Обведите графу «Обозначение» на листе.",
+            RegionTarget.Name => "Обведите графу «Наименование» на листе.",
+            RegionTarget.Stamp => "Обведите штамп целиком.",
+            _ => ""
+        };
     }
 
     private void RegionPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (!marking || ViewModel.Busy) return;
+        if (marking is null || ViewModel.Busy || choosingDocuments) return;
         dragStart = dragEnd = PointerPosition(e);
         Sheet.CapturePointer(e.Pointer);
         e.Handled = true;
@@ -318,10 +365,21 @@ public sealed partial class MainWindow : Window
         Sheet.ReleasePointerCapture(e.Pointer);
         if (region.Width * Sheet.Width > 5 && region.Height * Sheet.Height > 5)
         {
-            if (markingDesignation) designation = region;
-            else name = region;
-            marking = false;
-            RegionHint.Text = designation.HasValue && name.HasValue ? "Выделены обе графы." : "Выделите вторую графу.";
+            switch (marking)
+            {
+                case RegionTarget.Designation: designation = region; break;
+                case RegionTarget.Name: name = region; break;
+                case RegionTarget.Stamp: stamp = region; break;
+            }
+            var markedStamp = marking == RegionTarget.Stamp;
+            Mark(null);
+            RegionHint.Text = markedStamp ? "Рамка выделена."
+                : (designation.HasValue, name.HasValue) switch
+                {
+                    (true, true) => "Выделены обе графы. Нажмите «Прочитать графы».",
+                    (true, false) => "Выберите «Наименование» и обведите графу.",
+                    _ => "Выберите «Обозначение» и обведите графу."
+                };
         }
         UpdateCommands();
         PaintRegions();
@@ -345,7 +403,7 @@ public sealed partial class MainWindow : Window
         Overlays.Children.Clear();
         var recognized = current?.SelectedCandidate;
         var fields = recognized?.Page == page ? recognized.Regions : null;
-        if (fields?.TitleBlock is { } block) Draw(block, Colors.DodgerBlue, true);
+        if ((stamp ?? fields?.TitleBlock) is { } block) Draw(block, Colors.DodgerBlue, true);
         if ((designation ?? fields?.Designation) is { } first) Draw(first, Colors.DarkOrange);
         if ((name ?? fields?.Name) is { } second) Draw(second, Colors.MediumSeaGreen);
         if (dragStart is { } start && dragEnd is { } end) Draw(Area.Between(start, end), Colors.DodgerBlue);
@@ -374,9 +432,93 @@ public sealed partial class MainWindow : Window
         PaintRegions();
     }
 
-    private void ConfirmValues(object sender, RoutedEventArgs e)
+    private async void ConfirmValues(object sender, RoutedEventArgs e)
     {
-        if (!ViewModel.Busy && current?.Confirm() == true) ViewModel.Message = "Значения подтверждены.";
+        if (ViewModel.Busy || renaming || choosingDocuments || current is not { } row) return;
+        if (row.Confirm()) ViewModel.Message = "Значения подтверждены.";
+        await ExportRegionsAsync();
+    }
+
+    private async void SaveRegions(object sender, RoutedEventArgs e) => await ExportRegionsAsync();
+
+    private async Task ExportRegionsAsync()
+    {
+        if (ViewModel.Busy || renaming || choosingDocuments || current is not { } row ||
+            designation is not { } first || name is not { } second) return;
+
+        choosingDocuments = true;
+        UpdateCommands();
+        var path = row.Source;
+        var number = page;
+        var turn = Orientation.SelectedIndex;
+        var regions = new FieldRegions(first, second, stamp);
+        try
+        {
+            var options = await ViewModel.LoadRecognitionOptionsAsync(useDefaultsOnError: true);
+            var template = await Task.Run(() => new DrawingAnalyzer().CreateTemplate(path, number, regions, turn,
+                "Шаблон штампа", options, default));
+            if (closing || current != row || page != number) return;
+            if (template is null)
+            {
+                ShowRegionActions(true);
+                RegionHint.Text = "Уточните границы штампа.";
+                return;
+            }
+
+            await SaveTemplateAsync(template, Path.GetFileNameWithoutExtension(path));
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
+        {
+            ViewModel.Message = $"Не удалось сохранить шаблон. {ex.Message}";
+        }
+        finally
+        {
+            choosingDocuments = false;
+            if (!closing) UpdateCommands();
+        }
+    }
+
+    private async Task SaveTemplateAsync(TitleTemplate template, string suggestedName)
+    {
+        var templateName = new TextBox { Header = "Имя шаблона", Text = suggestedName };
+        var content = new StackPanel { Spacing = 8 };
+        content.Children.Add(templateName);
+        content.Children.Add(new TextBlock
+        {
+            Text = "Выберите JSON для сохранения. В существующем файле одноимённый шаблон будет обновлён.",
+            TextWrapping = TextWrapping.Wrap
+        });
+        var dialog = new ContentDialog
+        {
+            XamlRoot = Root.XamlRoot,
+            Title = template.PageTurn is null ? "Сохранить шаблон штампа" : "Сохранить шаблон для страниц того же размера",
+            Content = content,
+            PrimaryButtonText = "Новый JSON", SecondaryButtonText = "Существующий JSON",
+            CloseButtonText = "Пропустить", DefaultButton = ContentDialogButton.Close,
+            IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(suggestedName),
+            IsSecondaryButtonEnabled = !string.IsNullOrWhiteSpace(suggestedName)
+        };
+        templateName.TextChanged += (_, _) =>
+            dialog.IsPrimaryButtonEnabled = dialog.IsSecondaryButtonEnabled = !string.IsNullOrWhiteSpace(templateName.Text);
+        var choice = await dialog.ShowAsync();
+        if (choice == ContentDialogResult.None || closing) return;
+        var newFile = choice == ContentDialogResult.Primary;
+        var file = newFile ? await PickNewTemplateFileAsync() : await FilePicker(".json").PickSingleFileAsync();
+        if (file is null || closing) return;
+
+        template = template with { Name = templateName.Text.Trim() };
+        await Task.Run(() => template.Save(file.Path, newFile));
+        var active = string.Equals(Path.GetFullPath(file.Path), ViewModel.TemplatePath, StringComparison.OrdinalIgnoreCase);
+        ViewModel.Message = active ? "Шаблон сохранён и будет применён при следующем распознавании."
+            : "Шаблон сохранён. Его можно загрузить в настройках.";
+    }
+
+    private async Task<Windows.Storage.StorageFile?> PickNewTemplateFileAsync()
+    {
+        var picker = new FileSavePicker { SuggestedFileName = "Шаблоны штампов" };
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeChoices.Add("Шаблоны JSON", [".json"]);
+        return await picker.PickSaveFileAsync();
     }
 
     private async void Rename(object sender, RoutedEventArgs e)

@@ -288,6 +288,107 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public void SavesManuallySelectedStampAndFindsItOnAnotherSheet()
+    {
+        var sheet = Sheet(842, 595, 0);
+        var content = sheet.Content.Replace("382 57 m 525 57 l S", "382 67 m 525 67 l S");
+        var sample = Pdf(sheet with { Content = content });
+        var frame = new Area(302d / 842, 425d / 595, 525d / 842, 156d / 595);
+        var regions = new FieldRegions(new Area(.36, .01, .57, .25).Inside(frame),
+            new Area(.36, .28, .35, .43).Inside(frame), frame);
+        var analyzer = new DrawingAnalyzer();
+        var path = Path.Combine(folder, "saved.json");
+        var created = analyzer.CreateTemplate(sample, 1, regions, 0, "Workshop", new(false), default);
+        Assert.NotNull(created);
+        created.Save(path);
+
+        var template = Assert.Single(TitleTemplate.Load(path));
+        Assert.Equal("Workshop", template.Name);
+        var larger = Pdf(new Page(1191, 842, 90,
+            "q 1 0 0 1 349 0 cm\n" + content.Replace("ABCD.123456.001", "ABCD.123456.002") + "\nQ"));
+        var result = analyzer.Analyze(larger, new(false, Templates: [.. TitleTemplate.Defaults, template]), default);
+        Assert.Equal(RecognitionStatus.Ready, result.Status);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal("ABCD.123456.002", candidate.Designation);
+        Assert.Equal("Main Housing", candidate.Name);
+    }
+
+    [Fact]
+    public void SavingIntoExistingJsonAddsTemplatesAndUpdatesOnlyTheMatchingName()
+    {
+        var path = Path.Combine(folder, "templates.json");
+        var first = TitleTemplate.Defaults[0] with { Name = "Workshop" };
+        var second = TitleTemplate.Defaults[1] with { Name = "Specification" };
+        first.Save(path);
+        second.Save(path);
+        (first with { WidthMm = 190 }).Save(path);
+
+        Assert.Collection(TitleTemplate.Load(path),
+            template =>
+            {
+                Assert.Equal("Workshop", template.Name);
+                Assert.Equal(190, template.WidthMm);
+            },
+            template => Assert.Equal("Specification", template.Name));
+    }
+
+    [Fact]
+    public void SavingRejectsInvalidExistingJsonWithoutChangingIt()
+    {
+        var path = Path.Combine(folder, "invalid.json");
+        const string original = "[{";
+        File.WriteAllText(path, original);
+
+        Assert.Throws<System.Text.Json.JsonException>(() => TitleTemplate.Defaults[0].Save(path));
+        Assert.Equal(original, File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void SavesPageRegionsWithoutAStampOrTextInBothFields()
+    {
+        const string designation = "BT /F1 14 Tf 60 750 Td (Hello world page 1) Tj ET";
+        const string title = "\nBT /F1 14 Tf 410 55 Td (Example title) Tj ET";
+        var sheet = new Page(595, 842, 0, designation);
+        var analyzer = new DrawingAnalyzer();
+        var options = new RecognitionOptions(OcrEnabled: false);
+        var regions = new FieldRegions(new(.08, .08, .24, .05), new(.67, .90, .26, .05));
+        Assert.Empty(analyzer.ReadRegions(Pdf(sheet), 1, regions, 0, options, default).Name);
+
+        var template = analyzer.CreateTemplate(Pdf(sheet), 1, regions, 0, "Sheet layout", options, default);
+        Assert.NotNull(template);
+        var json = Path.Combine(folder, "page-layout.json");
+        template.Save(json);
+        options = options with { Templates = [.. TitleTemplate.Defaults, .. TitleTemplate.Load(json)] };
+
+        var result = analyzer.Analyze(Pdf(sheet with { Content = designation + title }), options, default);
+        Assert.Equal(RecognitionStatus.Review, result.Status);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal("Hello world page 1", candidate.Designation);
+        Assert.Equal("Example title", candidate.Name);
+        Assert.Empty(analyzer.Analyze(Pdf(sheet with { Width = 650, Content = designation + title }),
+            options, default).Candidates);
+    }
+
+    [Fact]
+    public void FindsKnownStampForTemplateExportUsingOnlyTheTwoFields()
+    {
+        var path = Pdf(Sheet(595, 842, 0));
+        var analyzer = new DrawingAnalyzer();
+        var options = new RecognitionOptions(OcrEnabled: false);
+        var candidate = Assert.Single(analyzer.Analyze(path, options, default).Candidates);
+        var interior = new Area(.05, .05, .9, .9);
+        var regions = new FieldRegions(interior.Inside(candidate.Regions.Designation),
+            new Area(.05, .02, .9, .31).Inside(candidate.Regions.Name));
+        var template = analyzer.CreateTemplate(path, 1, regions, 0, "Workshop", options, default);
+
+        Assert.NotNull(template);
+        Assert.InRange(template.WidthMm, 184, 186);
+        Assert.InRange(template.HeightMm, 54, 56);
+        var result = analyzer.Analyze(path, options with { Templates = [.. TitleTemplate.Defaults, template] }, default);
+        Assert.Equal("Main", Assert.Single(result.Candidates).Name);
+    }
+
+    [Fact]
     public void CancellationStopsBeforeRecognition()
     {
         var path = Pdf(Sheet(595, 842, 0));

@@ -24,13 +24,34 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] public partial bool OcrEnabled { get; set; } = true;
     [ObservableProperty] public partial string Languages { get; set; } = "rus+eng";
     [ObservableProperty] public partial string TemplateLabel { get; set; } = "Встроенные шаблоны ЕСКД";
-    private IReadOnlyList<TitleTemplate> templates = TitleTemplate.Defaults;
-    public RecognitionOptions Options => new(OcrEnabled, Languages, templates);
+    public string? TemplatePath { get; private set; }
+    private RecognitionOptions Options => new(OcrEnabled, Languages);
 
     public void SetTemplates(string? path)
     {
-        templates = path is null ? TitleTemplate.Defaults : [.. TitleTemplate.Defaults, .. TitleTemplate.Load(path)];
+        if (path is not null)
+        {
+            path = Path.GetFullPath(path);
+            TitleTemplate.Load(path);
+        }
+        TemplatePath = path;
         TemplateLabel = path is null ? "Встроенные шаблоны ЕСКД" : Path.GetFileName(path);
+    }
+
+    public async Task<RecognitionOptions> LoadRecognitionOptionsAsync(bool useDefaultsOnError = false)
+    {
+        var options = Options;
+        if (TemplatePath is not { } path) return options;
+        try
+        {
+            var custom = await Task.Run(() => TitleTemplate.Load(path));
+            return options with { Templates = [.. TitleTemplate.Defaults, .. custom] };
+        }
+        catch (Exception ex) when (useDefaultsOnError && (ex is IOException or UnauthorizedAccessException or
+            InvalidDataException or System.Text.Json.JsonException))
+        {
+            return options;
+        }
     }
 
     public void Add(IEnumerable<string> paths)
@@ -103,12 +124,19 @@ public sealed partial class MainViewModel : ObservableObject
         using var operation = new CancellationTokenSource();
         cancellation = operation;
         var batch = Rows.Where(r => r.Included).ToArray();
-        var options = Options;
         Progress = 0;
         try
         {
             await WorkAsync(async () =>
             {
+                RecognitionOptions options;
+                try { options = await LoadRecognitionOptionsAsync(); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                    InvalidDataException or System.Text.Json.JsonException)
+                {
+                    Message = "Не удалось загрузить выбранный JSON. Проверьте файл или сбросьте шаблоны в настройках.";
+                    return;
+                }
                 for (var index = 0; index < batch.Length; index++)
                 {
                     operation.Token.ThrowIfCancellationRequested();

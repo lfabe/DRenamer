@@ -77,9 +77,13 @@ public sealed class DrawingAnalyzer
                         var frame = location.PageFrame;
                         if (location.Verified && found.Any(other => ContainsSmallerStamp(other.PageFrame, frame)))
                             continue;
+                        if (location.Verified && TitleTemplate.Defaults.Contains(location.Template) &&
+                            found.Any(other => !TitleTemplate.Defaults.Contains(other.Template) &&
+                                other.Turn == location.Turn && TitleLocator.SameFrame(other.Frame, location.Frame)))
+                            continue;
                         var regions = location.Regions;
                         var candidate = ReadText(sheet, number, regions, location.Turn, location.Verified);
-                        if (!location.Verified)
+                        if (!location.Verified && location.Template.PageTurn is null)
                         {
                             if (LooksLikeGuessedPair(candidate)) matches.Add(candidate);
                             continue;
@@ -143,6 +147,44 @@ public sealed class DrawingAnalyzer
         using var ocr = new OcrReader(options);
         var candidate = ReadText(new(document.GetPage(page)), page, regions, turn, false);
         return HasBothFields(candidate) || !options.OcrEnabled ? candidate : ReadOcr(path, candidate, ocr, token);
+    }
+
+    public TitleTemplate? CreateTemplate(string path, int number, FieldRegions regions, int turn,
+        string name, RecognitionOptions options, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (!regions.Designation.IsValid || !regions.Name.IsValid)
+            throw new ArgumentException("Укажите обе графы.", nameof(regions));
+        using var document = PdfDocument.Open(path);
+        var page = document.GetPage(number);
+        var (width, height) = (turn & 1) == 0 ? (page.Width, page.Height) : (page.Height, page.Width);
+        var lines = new PdfSheet(page).Lines(token);
+        var template = Create(lines);
+        if (template is null && options.OcrEnabled)
+        {
+            var raster = renderer.Render(path, number, Area.Full, 2300, token);
+            template = Create(raster.FindLines(Area.Full, token).ToArray());
+        }
+        if (template is not null || regions.TitleBlock is { IsValid: true }) return template;
+
+        const double mmPerPoint = 25.4 / 72;
+        return new TitleTemplate(name, width * mmPerPoint, height * mmPerPoint,
+            regions.Designation.Rotate(turn), regions.Name.Rotate(turn), []) { PageTurn = turn };
+
+        TitleTemplate? Create(IReadOnlyList<Segment> segments)
+        {
+            if (regions.TitleBlock is { IsValid: true } frame)
+                return TitleLocator.CreateTemplate(segments, width, height, turn, regions, frame, name, token);
+
+            var templates = options.Templates ?? TitleTemplate.Defaults;
+            foreach (var location in TitleLocator.Find(segments, width, height, turn, templates, token))
+            {
+                if (location.IsContinuation) continue;
+                var result = TitleLocator.CreateTemplate(segments, width, height, turn, regions, location.PageFrame, name, token);
+                if (result is not null) return result;
+            }
+            return null;
+        }
     }
 
     private static IEnumerable<LocatedTitle> Find(IEnumerable<Segment> lines, double width, double height,
