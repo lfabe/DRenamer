@@ -34,7 +34,10 @@ foreach ($file in $crtFiles) {
     Copy-Item -LiteralPath (Join-Path $VcRedistDirectory $file) -Destination $Output -Force
 }
 Copy-Item -LiteralPath "$PSScriptRoot/README.md" -Destination $Output -Force
+Copy-Item -LiteralPath "$PSScriptRoot/LICENSE" -Destination $Output -Force
 $docs = New-Item -ItemType Directory -Path (Join-Path $Output 'docs') -Force
+Copy-Item -LiteralPath "$PSScriptRoot/docs/screenshot.jpg" -Destination $docs.FullName -Force
+Copy-Item -LiteralPath "$PSScriptRoot/docs/readme" -Destination $docs.FullName -Recurse -Force
 Copy-Item -LiteralPath "$PSScriptRoot/docs/template-example.json" -Destination $docs.FullName -Force
 $licenseDocs = New-Item -ItemType Directory -Path (Join-Path $docs.FullName 'licenses') -Force
 Copy-Item -LiteralPath "$PSScriptRoot/docs/licenses/README.md" -Destination $licenseDocs.FullName -Force
