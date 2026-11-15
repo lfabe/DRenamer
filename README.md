@@ -12,7 +12,7 @@ Drawing Renamer пакетно переименовывает PDF-чертежи
 
 ![Окно Drawing Renamer с результатами распознавания, новыми именами файлов и предпросмотром чертежа с выделенными графами штампа](docs/screenshot.jpg)
 
-## <img src="docs/readme/start.svg?v=2" alt="" width="28" height="28"> Быстрый старт
+## <sub><img src="docs/readme/start.svg?v=3" alt="" width="28" height="28"></sub> Быстрый старт
 
 Скачайте `DrawingRenamer-win-x64.zip` со страницы последнего выпуска, распакуйте архив целиком и запустите `DrawingRenamer.exe`. [Последний выпуск](https://github.com/lfabe/DRenamer/releases/latest)
 
@@ -38,7 +38,7 @@ Drawing Renamer пакетно переименовывает PDF-чертежи
 
 </details>
 
-## <img src="docs/readme/build.svg?v=2" alt="" width="28" height="28"> Сборка и тесты
+## <sub><img src="docs/readme/build.svg?v=3" alt="" width="28" height="28"></sub> Сборка и тесты
 
 Для сборки на Windows нужны Git, .NET SDK 10 и Visual Studio с поддержкой .NET 10. Установите инструменты с официальных страниц. [Git](https://git-scm.com/downloads/win) · [.NET SDK 10](https://dotnet.microsoft.com/download/dotnet/10.0) · [Visual Studio](https://visualstudio.microsoft.com/downloads/)
 
@@ -64,7 +64,7 @@ pwsh -NoProfile -File .\Publish.ps1
 
 `Publish.ps1` публикует папку `artifacts/DrawingRenamer-win-x64`. Если Visual Studio не найдена, передайте путь к папке `Microsoft.VC143.CRT` для x64 через `-VcRedistDirectory`.
 
-## <img src="docs/readme/templates.svg?v=2" alt="" width="28" height="28"> Шаблоны
+## <sub><img src="docs/readme/templates.svg?v=3" alt="" width="28" height="28"></sub> Шаблоны
 
 Программа ищет основные надписи форм 1, 2, 2а и 2б по ГОСТ Р 2.104-2023 и форм 3–5 СПДС. Из форм 1 и 2 считываются обозначение и наименование, в том числе у групповых спецификаций. Формы 2а и 2б содержат только обозначение. Если в PDF есть только последующие листы, наименование нужно ввести вручную.
 
