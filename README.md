@@ -8,7 +8,7 @@ Drawing Renamer пакетно переименовывает PDF-чертежи
 
 [Скачать для Windows](https://github.com/lfabe/DRenamer/releases/latest) · [Пример шаблона JSON](docs/template-example.json) · [Лицензии зависимостей](docs/licenses/README.md)
 
-## <img src="docs/readme/start.svg" alt="" width="20" height="20"> Быстрый старт
+## <img src="docs/readme/start.svg" alt="" width="28" height="28" align="absmiddle"> Быстрый старт
 
 Скачайте `DrawingRenamer-win-x64.zip` для Windows 10/11 x64, распакуйте архив целиком и запустите `DrawingRenamer.exe`. В архиве есть .NET, Windows App SDK, нативные DLL и модели OCR для русского и английского.
 
@@ -24,7 +24,7 @@ Drawing Renamer пакетно переименовывает PDF-чертежи
 
 **Журнал** показывает результаты, ошибки и пропуски. **Отменить переименование** возвращает перемещённые файлы в исходные папки под прежними именами или удаляет созданные копии, если исходники и копии сохранились без изменений. Журнал находится в `%LOCALAPPDATA%\DrawingRenamer\history.json` и доступен после перезапуска.
 
-## <img src="docs/readme/build.svg" alt="" width="20" height="20"> Сборка
+## <img src="docs/readme/build.svg" alt="" width="28" height="28" align="absmiddle"> Сборка
 
 Нужны .NET SDK 10 и Visual Studio с поддержкой .NET 10. Для подготовки переносимого выпуска нужен также x64 Visual C++ Redistributable из Visual Studio с компонентом MSVC v143. Первый restore получает зависимости из NuGet. Языковые модели уже находятся в исходниках.
 
@@ -39,7 +39,7 @@ pwsh -NoProfile -File .\Publish.ps1
 
 `Publish.ps1` публикует папку `artifacts/DrawingRenamer-win-x64`. Если Visual Studio не найдена, передайте путь к папке `Microsoft.VC143.CRT` для x64 через `-VcRedistDirectory`.
 
-## <img src="docs/readme/templates.svg" alt="" width="20" height="20"> Шаблоны
+## <img src="docs/readme/templates.svg" alt="" width="28" height="28" align="absmiddle"> Шаблоны
 
 Программа ищет основные надписи форм 1, 2, 2а и 2б по ГОСТ Р 2.104-2023 и форм 3–5 СПДС. Из форм 1 и 2 считываются обозначение и наименование, в том числе у групповых спецификаций. Формы 2а и 2б содержат только обозначение. Если в PDF есть только последующие листы, наименование нужно ввести вручную.
 
