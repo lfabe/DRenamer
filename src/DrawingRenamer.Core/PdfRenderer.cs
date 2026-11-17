@@ -6,11 +6,15 @@ namespace DrawingRenamer;
 public sealed record Raster(int Width, int Height, byte[] Pixels)
 {
     // PDFium returns BGRx. BMP also gives Leptonica an in-memory input with no temporary files.
-    internal byte[] ToBmp(int turns)
+    internal byte[] ToBmp(int turns, double horizontalShear)
     {
-        var width = (turns & 1) == 0 ? Width : Height;
-        var height = (turns & 1) == 0 ? Height : Width;
-        var bmp = new byte[54 + Pixels.Length];
+        var rotatedWidth = (turns & 1) == 0 ? Width : Height;
+        var rotatedHeight = (turns & 1) == 0 ? Height : Width;
+        var padding = horizontalShear == 0 ? 0 : Math.Min(rotatedWidth, rotatedHeight) / 6;
+        var width = rotatedWidth + 2 * padding + (int)Math.Round((rotatedHeight - 1) * horizontalShear);
+        var height = rotatedHeight + 2 * padding;
+        var bmp = new byte[54 + 4 * width * height];
+        if (horizontalShear != 0) bmp.AsSpan(54).Fill(255);
         bmp[0] = (byte)'B';
         bmp[1] = (byte)'M';
         BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(2), bmp.Length);
@@ -33,7 +37,8 @@ public sealed record Raster(int Width, int Height, byte[] Pixels)
                 _ => (x, y)
             };
             var from = 4 * (y * Width + x);
-            var to = 54 + 4 * ((height - 1 - dy) * width + dx);
+            var shift = (int)Math.Round(dy * horizontalShear);
+            var to = 54 + 4 * ((height - 1 - padding - dy) * width + padding + dx + shift);
             Pixels.AsSpan(from, 3).CopyTo(bmp.AsSpan(to, 3));
         }
         return bmp;
@@ -88,14 +93,61 @@ public sealed class PdfRenderer
     {
         if (!crop.IsValid || number < 1 || maxEdge is < 32 or > 4096)
             throw new ArgumentOutOfRangeException(nameof(crop));
+        token.ThrowIfCancellationRequested();
+        // Open with a managed stream so filenames use Windows Unicode path handling.
+        using var input = File.OpenRead(path);
+        return WithDocument(input, document => RenderPage(document, number, crop, maxEdge, token), token);
+    }
+
+    internal static void SaveRotated(Stream input, Stream output, IReadOnlyDictionary<int, int> rotations)
+    {
+        WithDocument(input, document =>
+        {
+            const uint modifyContents = 1 << 3;
+            const uint assemblePages = 1 << 10;
+            var requiredPermission = Native.FPDF_GetSecurityHandlerRevision(document) < 3 ? modifyContents : assemblePages;
+            if ((Native.FPDF_GetDocPermissions(document) & requiredPermission) == 0)
+                throw new InvalidDataException("Параметры защиты PDF запрещают поворачивать листы.");
+
+            var count = Native.FPDF_GetPageCount(document);
+            foreach (var (number, turns) in rotations)
+            {
+                if (number < 1 || number > count || turns is < 1 or > 3)
+                    throw new InvalidDataException("Указан недопустимый номер листа или угол поворота.");
+                var page = Native.FPDF_LoadPage(document, number - 1);
+                if (page == IntPtr.Zero) throw new InvalidDataException("Не удалось открыть страницу PDF.");
+                try { Native.FPDFPage_SetRotation(page, (Native.FPDFPage_GetRotation(page) + turns) % 4); }
+                finally { Native.FPDF_ClosePage(page); }
+            }
+
+            Exception? writeError = null;
+            Native.WriteBlock write = (_, data, size) =>
+            {
+                try { return WriteBlock(output, data, size); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    writeError = ex;
+                    return 0;
+                }
+            };
+            var writer = new Native.FileWrite(1, write);
+            const uint incremental = 1;
+            var saved = Native.FPDF_SaveAsCopy(document, ref writer, incremental);
+            GC.KeepAlive(write);
+            if (writeError is not null) throw new IOException("Не удалось записать PDF.", writeError);
+            if (saved == 0) throw new InvalidDataException("PDFium не смог сохранить поворот листов.");
+            return saved;
+        });
+    }
+
+    private static T WithDocument<T>(Stream input, Func<IntPtr, T> action, CancellationToken token = default)
+    {
         lock (Gate)
         {
             token.ThrowIfCancellationRequested();
             Native.FPDF_InitLibrary();
             try
             {
-                // Open with a managed stream so filenames use Windows Unicode path handling.
-                using var input = File.OpenRead(path);
                 if (input.Length > uint.MaxValue)
                     throw new InvalidDataException("PDF превышает 4 ГиБ.");
                 Native.ReadBlock read = (_, position, buffer, size) =>
@@ -112,7 +164,7 @@ public sealed class PdfRenderer
                 if (document == IntPtr.Zero)
                     throw new InvalidDataException(Native.FPDF_GetLastError() == 4
                         ? "PDF защищён паролем." : "PDFium не смог открыть документ.");
-                try { return RenderPage(document, number, crop, maxEdge, token); }
+                try { return action(document); }
                 finally
                 {
                     Native.FPDF_CloseDocument(document);
@@ -127,6 +179,13 @@ public sealed class PdfRenderer
     {
         if (size > int.MaxValue) return 0;
         stream.ReadExactly(new Span<byte>((void*)buffer, (int)size));
+        return 1;
+    }
+
+    private static unsafe int WriteBlock(Stream stream, IntPtr buffer, uint size)
+    {
+        if (size > int.MaxValue) return 0;
+        stream.Write(new ReadOnlySpan<byte>((void*)buffer, (int)size));
         return 1;
     }
 
@@ -173,13 +232,23 @@ public sealed class PdfRenderer
         public delegate int ReadBlock(IntPtr state, uint position, IntPtr buffer, uint size);
         [StructLayout(LayoutKind.Sequential)]
         public readonly record struct FileAccess(uint Length, ReadBlock Read, IntPtr State);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        public delegate int WriteBlock(IntPtr writer, IntPtr buffer, uint size);
+        [StructLayout(LayoutKind.Sequential)]
+        public readonly record struct FileWrite(int Version, WriteBlock Write);
         [DllImport(Dll)] public static extern void FPDF_InitLibrary();
         [DllImport(Dll)] public static extern void FPDF_DestroyLibrary();
         [DllImport(Dll)] public static extern IntPtr FPDF_LoadCustomDocument(ref FileAccess access, IntPtr password);
         [DllImport(Dll)] public static extern uint FPDF_GetLastError();
         [DllImport(Dll)] public static extern void FPDF_CloseDocument(IntPtr document);
+        [DllImport(Dll)] public static extern uint FPDF_GetDocPermissions(IntPtr document);
+        [DllImport(Dll)] public static extern int FPDF_GetSecurityHandlerRevision(IntPtr document);
+        [DllImport(Dll)] public static extern int FPDF_GetPageCount(IntPtr document);
         [DllImport(Dll)] public static extern IntPtr FPDF_LoadPage(IntPtr document, int index);
         [DllImport(Dll)] public static extern void FPDF_ClosePage(IntPtr page);
+        [DllImport(Dll)] public static extern int FPDFPage_GetRotation(IntPtr page);
+        [DllImport(Dll)] public static extern void FPDFPage_SetRotation(IntPtr page, int turns);
+        [DllImport(Dll)] public static extern int FPDF_SaveAsCopy(IntPtr document, ref FileWrite writer, uint flags);
         [DllImport(Dll)] public static extern float FPDF_GetPageWidthF(IntPtr page);
         [DllImport(Dll)] public static extern float FPDF_GetPageHeightF(IntPtr page);
         [DllImport(Dll)] public static extern IntPtr FPDFBitmap_Create(int width, int height, int alpha);

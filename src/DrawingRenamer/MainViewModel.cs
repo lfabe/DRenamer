@@ -15,6 +15,7 @@ public sealed partial class MainViewModel : ObservableObject
     public RenameService Renamer { get; } = new(Path.Combine(DataFolder, "history.json"));
     public ObservableCollection<DocumentRow> Rows { get; } = [];
     public bool HasDocumentSources => folders.Count > 0 || individualFiles.Count > 0;
+    public bool CanUndo { get; private set; }
 
     [ObservableProperty] public partial DocumentRow? Selected { get; set; }
     [ObservableProperty] public partial bool Busy { get; set; }
@@ -22,7 +23,7 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] public partial double Progress { get; set; }
     [ObservableProperty] public partial string Message { get; set; } = "Добавьте PDF-файлы или папку.";
     [ObservableProperty] public partial bool OcrEnabled { get; set; } = true;
-    [ObservableProperty] public partial string Languages { get; set; } = "rus+eng";
+    [ObservableProperty] public partial string Languages { get; set; } = "rus";
     [ObservableProperty] public partial string TemplateLabel { get; set; } = "Встроенные шаблоны ЕСКД";
     public string? TemplatePath { get; private set; }
     private RecognitionOptions Options => new(OcrEnabled, Languages);
@@ -54,12 +55,22 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
-    public void Add(IEnumerable<string> paths)
+    public Task AddDocumentsAsync(IEnumerable<string> files, params string[] directories)
     {
-        var pdfs = paths.Where(IsPdf).Select(path => Path.GetFullPath(path)).ToArray();
+        if (Busy) return Task.CompletedTask;
+        var pdfs = files.Where(IsPdf).Select(path => Path.GetFullPath(path)).ToArray();
+        var sources = directories.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path))).ToArray();
         individualFiles.UnionWith(pdfs);
+        if (sources.Length > 0)
+        {
+            folders.UnionWith(sources);
+            return RefreshDocumentsAsync();
+        }
+
         var count = AddRows(pdfs);
-        Message = $"Добавлено: {count}. В очереди: {Rows.Count}.";
+        Message = pdfs.Length == 0 ? "Добавьте PDF-файлы или папки."
+            : $"Добавлено: {count}. В очереди: {Rows.Count}.";
+        return Task.CompletedTask;
     }
 
     private int AddRows(IEnumerable<string> paths)
@@ -76,19 +87,14 @@ public sealed partial class MainViewModel : ObservableObject
         return count;
     }
 
-    public Task AddFolderAsync(string folder)
-    {
-        if (Busy) return Task.CompletedTask;
-        folders.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)));
-        return RefreshDocumentsAsync();
-    }
-
     public async Task RefreshDocumentsAsync()
     {
-        if (!HasDocumentSources || Busy) return;
+        if (Busy) return;
         var recursiveSearch = Recursive;
         await WorkAsync(async () =>
         {
+            CanUndo = await Task.Run(Renamer.HasUndoableOperations);
+            if (!HasDocumentSources) return;
             Message = "Обновление списка…";
             var paths = await Task.Run(() =>
             {
@@ -172,8 +178,16 @@ public sealed partial class MainViewModel : ObservableObject
     {
         await WorkAsync(async () =>
         {
-            var results = await Task.Run(() => requests is null
-                ? Renamer.Undo() : Renamer.Execute(requests, skipped, destination, removeOriginals));
+            IReadOnlyList<MoveResult> results;
+            try
+            {
+                results = await Task.Run(() => requests is null
+                    ? Renamer.Undo() : Renamer.Execute(requests, skipped, destination, removeOriginals));
+            }
+            finally
+            {
+                CanUndo = await Task.Run(Renamer.HasUndoableOperations);
+            }
             foreach (var result in results)
             {
                 var oldPath = result.Status == MoveStatus.Undone ? result.Target : result.Source;
@@ -185,7 +199,11 @@ public sealed partial class MainViewModel : ObservableObject
                     var newPath = result.Status == MoveStatus.Undone ? result.Source : result.Target!;
                     if (oldPath is not null) individualFiles.Remove(oldPath);
                     individualFiles.Add(newPath);
-                    if (row is not null) row.Source = newPath;
+                    if (row is not null)
+                    {
+                        if (result.PageRotations is { } rotations) row.ApplySavedRotations(rotations);
+                        row.Source = newPath;
+                    }
                 }
                 if (row is null) continue;
                 row.Diagnostic = result.Message;

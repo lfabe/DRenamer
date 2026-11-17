@@ -6,6 +6,8 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Shapes;
+using Windows.ApplicationModel.DataTransfer;
+using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.Storage.Streams;
 using Windows.Graphics.Imaging;
@@ -22,6 +24,7 @@ public sealed partial class MainWindow : Window
     private DocumentRow? current;
     private int page = 1;
     private int pageCount;
+    private (int Width, int Height) sheetSize;
     private Area? designation;
     private Area? name;
     private Area? stamp;
@@ -32,10 +35,22 @@ public sealed partial class MainWindow : Window
     private bool closing;
     private bool renaming;
     private bool choosingDocuments;
+    private bool CanChangeDocuments => !closing && !ViewModel.Busy && !renaming && !choosingDocuments;
+    private int PreviewTurn => (int)SheetRotation.Angle / 90;
+    private int RegionTurn => (PreviewTurn + Orientation.SelectedIndex) & 3;
+    private double RegionStrokeThickness => 1.25 / PreviewScroll.ZoomFactor;
 
     public MainWindow()
     {
         InitializeComponent();
+        PreviewScroll.ViewChanged += (_, _) =>
+        {
+            var thickness = RegionStrokeThickness;
+            foreach (var outline in Overlays.Children.OfType<Rectangle>())
+                outline.StrokeThickness = thickness;
+        };
+        Root.AddHandler(UIElement.DragOverEvent, new DragEventHandler(DocumentsDragOver), true);
+        Root.AddHandler(UIElement.DropEvent, new DragEventHandler(DocumentsDropped), true);
         Title = "Drawing Renamer";
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "DrawingRenamer.ico"));
         AppWindow.Resize(new(1320, 820));
@@ -69,7 +84,7 @@ public sealed partial class MainWindow : Window
 
     private void UpdateCommands()
     {
-        var available = !ViewModel.Busy && !renaming && !choosingDocuments;
+        var available = CanChangeDocuments;
         AddFilesButton.IsEnabled = available;
         AddFolderButton.IsEnabled = available;
         RecursiveCheckBox.IsEnabled = available;
@@ -77,9 +92,10 @@ public sealed partial class MainWindow : Window
         AnalyzeButton.IsEnabled = available && ViewModel.Rows.Count > 0;
         CancelButton.Visibility = ViewModel.AnalyzeCommand.IsRunning ? Visibility.Visible : Visibility.Collapsed;
         RenameButton.IsEnabled = available && ViewModel.Rows.Count > 0;
-        UndoButton.IsEnabled = available;
+        UndoButton.IsEnabled = available && ViewModel.CanUndo;
         Editor.IsHitTestVisible = available;
         Documents.IsEnabled = available;
+        RotateLeftButton.IsEnabled = RotateRightButton.IsEnabled = available && PageImage.Source is not null;
         ToggleRegionsButton.IsEnabled = StartManualRegionsButton.IsEnabled = available;
         MarkDesignationButton.IsEnabled = MarkNameButton.IsEnabled = MarkStampButton.IsEnabled = available;
         ReadRegionsButton.IsEnabled = SaveRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
@@ -101,7 +117,8 @@ public sealed partial class MainWindow : Window
         try
         {
             var files = await FilePicker(".pdf").PickMultipleFilesAsync();
-            if (!closing) ViewModel.Add(files.Select(file => file.Path));
+            if (!closing && files.Count > 0)
+                await ViewModel.AddDocumentsAsync(files.Select(file => file.Path));
         }
         catch (Exception ex) { ViewModel.Message = $"Не удалось открыть выбор файлов ({ex.GetType().Name})."; }
         finally { choosingDocuments = false; if (!closing) UpdateCommands(); }
@@ -114,9 +131,45 @@ public sealed partial class MainWindow : Window
         try
         {
             if (await PickFolderPathAsync() is { } path && !closing)
-                await ViewModel.AddFolderAsync(path);
+                await ViewModel.AddDocumentsAsync([], path);
         }
         catch (Exception ex) { ViewModel.Message = $"Не удалось выбрать папку ({ex.GetType().Name})."; }
+        finally { choosingDocuments = false; if (!closing) UpdateCommands(); }
+    }
+
+    private void DocumentsDragOver(object sender, DragEventArgs e)
+    {
+        if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+        e.AcceptedOperation = CanChangeDocuments ? DataPackageOperation.Copy : DataPackageOperation.None;
+        if (CanChangeDocuments) e.DragUIOverride.Caption = "Добавить PDF и папки";
+        e.Handled = true;
+    }
+
+    private async void DocumentsDropped(object sender, DragEventArgs e)
+    {
+        if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+        e.Handled = true;
+        e.AcceptedOperation = CanChangeDocuments ? DataPackageOperation.Copy : DataPackageOperation.None;
+        if (!CanChangeDocuments) return;
+
+        choosingDocuments = true;
+        UpdateCommands();
+        try
+        {
+            IReadOnlyList<IStorageItem> items;
+            var deferral = e.GetDeferral();
+            try { items = await e.DataView.GetStorageItemsAsync(); }
+            finally { deferral.Complete(); }
+            if (closing) return;
+
+            var files = items.OfType<StorageFile>().Select(file => file.Path).Where(Path.IsPathFullyQualified);
+            var folders = items.OfType<StorageFolder>().Select(folder => folder.Path).Where(Path.IsPathFullyQualified);
+            await ViewModel.AddDocumentsAsync(files, folders.ToArray());
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            if (!closing) ViewModel.Message = $"Не удалось добавить перетащенные файлы и папки ({ex.GetType().Name}).";
+        }
         finally { choosingDocuments = false; if (!closing) UpdateCommands(); }
     }
 
@@ -213,13 +266,15 @@ public sealed partial class MainWindow : Window
         preview = operation;
         var row = current;
         page = Math.Max(1, number);
+        SheetRotation.Angle = (row?.PageRotations.GetValueOrDefault(page) ?? 0) * 90;
         designation = name = stamp = null;
         dragStart = dragEnd = null;
         RegionControls.Visibility = Visibility.Collapsed;
         ShowRegionActions(false);
-        UpdateCommands();
         PageImage.Source = null;
         Sheet.Width = Sheet.Height = 0;
+        SheetExtent.Width = SheetExtent.Height = 0;
+        UpdateCommands();
         Overlays.Children.Clear();
         PreviousButton.IsEnabled = NextButton.IsEnabled = false;
         PageLabel.Text = "—";
@@ -249,12 +304,10 @@ public sealed partial class MainWindow : Window
             var bitmap = new SoftwareBitmapSource();
             await bitmap.SetBitmapAsync(buffer);
             operation.Token.ThrowIfCancellationRequested();
-            var scale = Math.Min(Math.Max(100, PreviewScroll.ActualWidth - 16) / result.raster.Width,
-                Math.Max(100, PreviewScroll.ActualHeight - 58) / result.raster.Height);
-            Sheet.Width = PageImage.Width = result.raster.Width * scale;
-            Sheet.Height = PageImage.Height = result.raster.Height * scale;
+            sheetSize = (result.raster.Width, result.raster.Height);
+            FitSheet();
             PageImage.Source = bitmap;
-            PreviewScroll.ChangeView(0, 0, 1, true);
+            UpdateCommands();
             pageCount = result.count;
             PageLabel.Text = $"{page}/{pageCount}";
             PreviousButton.IsEnabled = page > 1;
@@ -263,7 +316,7 @@ public sealed partial class MainWindow : Window
             RegionControls.Visibility = Visibility.Visible;
             UpdateRegionGuidance();
             if (row.SelectedCandidate is { } candidate && candidate.Page == page)
-                Orientation.SelectedIndex = candidate.Turn;
+                Orientation.SelectedIndex = (candidate.Turn - PreviewTurn) & 3;
             else Orientation.SelectedIndex = 0;
             PaintRegions();
         }
@@ -282,6 +335,37 @@ public sealed partial class MainWindow : Window
     private void ZoomOut(object sender, RoutedEventArgs e) => Zoom(.8f);
     private void Zoom(float factor) => PreviewScroll.ChangeView(null, null,
         Math.Clamp(PreviewScroll.ZoomFactor * factor, .25f, 5f));
+
+    private void RotateLeft(object sender, RoutedEventArgs e) => RotateSheet(-90);
+    private void RotateRight(object sender, RoutedEventArgs e) => RotateSheet(90);
+
+    private void RotateSheet(int degrees)
+    {
+        if (current is not { } row || PageImage.Source is null || dragStart.HasValue) return;
+        SheetRotation.Angle = (SheetRotation.Angle + degrees + 360) % 360;
+        var turns = PreviewTurn;
+        if (turns == 0) row.PageRotations.Remove(page);
+        else row.PageRotations[page] = turns;
+        Orientation.SelectedIndex = 0;
+        FitSheet();
+        PaintRegions();
+    }
+
+    private void FitSheet()
+    {
+        var (width, height) = sheetSize;
+        var (extentWidth, extentHeight) = SheetRotation.Angle % 180 == 0 ? (width, height) : (height, width);
+        var scale = Math.Min(Math.Max(100, PreviewScroll.ActualWidth - 16) / extentWidth,
+            Math.Max(100, PreviewScroll.ActualHeight - 58) / extentHeight);
+        SheetExtent.Width = extentWidth * scale;
+        SheetExtent.Height = extentHeight * scale;
+        Sheet.Width = PageImage.Width = width * scale;
+        Sheet.Height = PageImage.Height = height * scale;
+        // Keep the rotated sheet centered inside the scrollable bounds.
+        Canvas.SetLeft(Sheet, (SheetExtent.Width - Sheet.Width) / 2);
+        Canvas.SetTop(Sheet, (SheetExtent.Height - Sheet.Height) / 2);
+        PreviewScroll.ChangeView(0, 0, 1, true);
+    }
 
     private void ToggleRegions(object sender, RoutedEventArgs e)
     {
@@ -416,7 +500,7 @@ public sealed partial class MainWindow : Window
                 Width = area.Width * Sheet.Width,
                 Height = area.Height * Sheet.Height,
                 Stroke = new SolidColorBrush(color),
-                StrokeThickness = 2,
+                StrokeThickness = RegionStrokeThickness,
                 StrokeDashArray = dashed ? new DoubleCollection { 4, 3 } : null
             };
             Canvas.SetLeft(rect, area.X * Sheet.Width);
@@ -428,7 +512,7 @@ public sealed partial class MainWindow : Window
     private async void ReadRegions(object sender, RoutedEventArgs e)
     {
         if (current is not { } row || designation is not { } first || name is not { } second) return;
-        await ViewModel.ReadAsync(row, page, new(first, second), Orientation.SelectedIndex);
+        await ViewModel.ReadAsync(row, page, new(first, second), RegionTurn);
         PaintRegions();
     }
 
@@ -450,7 +534,7 @@ public sealed partial class MainWindow : Window
         UpdateCommands();
         var path = row.Source;
         var number = page;
-        var turn = Orientation.SelectedIndex;
+        var turn = RegionTurn;
         var regions = new FieldRegions(first, second, stamp);
         try
         {
@@ -549,11 +633,13 @@ public sealed partial class MainWindow : Window
                 row.NameError ?? "Нажмите «Подтвердить значения» после проверки обеих граф.")).ToArray();
         string? destination = null;
         string? pickerError = null;
+        var preserveRotations = false;
         while (!closing)
         {
             var plans = await Task.Run(() => RenameService.Preview(requests, destination));
             if (closing) return;
             var pending = plans.Where(plan => plan.Status == MoveStatus.Pending).ToArray();
+            var approved = pending.Select(plan => plan.Source).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var skipped = plans.Where(plan => plan.Status == MoveStatus.Skipped).Concat(unconfirmed).ToArray();
             var summary = $"Будет обработано файлов: {pending.Length}. Будет пропущено: {skipped.Length}.";
             var details = skipped.Select(plan => $"{Path.GetFileName(plan.Source)}\n{plan.Message}")
@@ -573,6 +659,9 @@ public sealed partial class MainWindow : Window
                 Content = content
             };
             content.Children.Add(DialogMessage(message));
+            var saveRotations = new CheckBox { Content = "Сохранить поворот листов в PDF", IsChecked = preserveRotations };
+            if (requests.Any(request => request.PageRotations is not null && approved.Contains(request.Source)))
+                content.Children.Add(saveRotations);
             var reset = false;
             var removeOriginals = new CheckBox { Content = "Удалять исходные файлы после сохранения" };
             if (destination is not null)
@@ -590,6 +679,7 @@ public sealed partial class MainWindow : Window
             }
 
             var choice = await dialog.ShowAsync();
+            preserveRotations = saveRotations.IsChecked == true;
             if (reset)
             {
                 destination = null;
@@ -607,9 +697,9 @@ public sealed partial class MainWindow : Window
             }
             if (choice == ContentDialogResult.Primary)
             {
-                var approved = pending.Select(plan => plan.Source).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                await ViewModel.MoveAsync(requests.Where(request => approved.Contains(request.Source)).ToArray(), skipped,
-                    destination, removeOriginals.IsChecked == true);
+                var accepted = requests.Where(request => approved.Contains(request.Source))
+                    .Select(request => preserveRotations ? request : request with { PageRotations = null }).ToArray();
+                await ViewModel.MoveAsync(accepted, skipped, destination, removeOriginals.IsChecked == true);
             }
             return;
         }
@@ -617,9 +707,9 @@ public sealed partial class MainWindow : Window
 
     private async void Undo(object sender, RoutedEventArgs e)
     {
-        if (ViewModel.Busy || renaming) return;
+        if (!CanChangeDocuments || !ViewModel.CanUndo) return;
         if (await ConfirmDialog("Отменить последнюю операцию",
-            "Перемещённые файлы вернутся в исходные папки под прежними именами. Созданные копии будут удалены, если исходные PDF и копии не изменились.",
+            "Перемещённые PDF вернутся в исходные папки с прежними именами и ориентацией. Созданные копии будут удалены, если исходные PDF и копии не изменились.",
             "Отменить операцию"))
             await ViewModel.MoveAsync(null);
     }

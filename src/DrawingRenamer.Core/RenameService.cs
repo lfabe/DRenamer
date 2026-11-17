@@ -5,12 +5,19 @@ using System.Text.RegularExpressions;
 namespace DrawingRenamer;
 
 public enum MoveStatus { Skipped, Failed, Pending, Moved, UndoPending, Undone, Copied, CopyRemoved }
-public sealed record RenameRequest(string Source, string Designation, string Name);
-public sealed record MoveResult(string Source, string? Target, MoveStatus Status, string Message);
+public sealed record RenameRequest(string Source, string Designation, string Name)
+{
+    public IReadOnlyDictionary<int, int>? PageRotations { get; init; }
+}
+public sealed record MoveResult(string Source, string? Target, MoveStatus Status, string Message)
+{
+    public IReadOnlyDictionary<int, int>? PageRotations { get; init; }
+}
 
 public sealed class RenameService(string journalPath)
 {
-    private sealed record Entry(Guid Batch, DateTimeOffset Time, MoveResult Result, string? Hash);
+    private sealed record RotationRevision(string TargetHash, long OriginalLength, bool KeepSource);
+    private sealed record Entry(Guid Batch, DateTimeOffset Time, MoveResult Result, string? Hash, RotationRevision? Rotation = null);
 
     public static string? FileName(string designation, string name) => FileName(designation, name, out _);
 
@@ -83,7 +90,7 @@ public sealed class RenameService(string journalPath)
         var batch = Guid.NewGuid();
         var results = new List<MoveResult>();
         var copy = destination is not null && !removeOriginals;
-        foreach (var plan in Preview(requests, destination))
+        foreach (var (plan, request) in Preview(requests, destination).Zip(requests))
         {
             string? hash = null;
             if (plan.Status == MoveStatus.Pending)
@@ -94,8 +101,23 @@ public sealed class RenameService(string journalPath)
                     Record(plan with { Status = MoveStatus.Failed, Message = Error(ex) }, null);
                     continue;
                 }
-                Record(plan with { Message = copy ? "Копирование начато." : "Переименование начато." }, hash, addResult: false);
-                Record(copy ? Copy(plan, hash) : Move(plan, undo: false), hash, replace: true);
+                var started = plan with { Message = copy ? "Копирование начато." : "Переименование начато.",
+                    PageRotations = request.PageRotations };
+                if (request.PageRotations is { Count: > 0 } turns)
+                {
+                    RotationRevision? rotation = null;
+                    var result = SaveWithRotation(plan with { PageRotations = turns }, hash, turns, copy, revision =>
+                    {
+                        rotation = revision;
+                        Record(started, hash, addResult: false, rotation: revision);
+                    });
+                    Record(result, hash, replace: rotation is not null, rotation: rotation);
+                }
+                else
+                {
+                    Record(started, hash, addResult: false);
+                    Record(copy ? Copy(plan, hash) : Move(plan, undo: false), hash, replace: true);
+                }
             }
             else Record(plan, hash);
         }
@@ -111,9 +133,9 @@ public sealed class RenameService(string journalPath)
         }
         return results;
 
-        void Record(MoveResult result, string? hash, bool replace = false, bool addResult = true)
+        void Record(MoveResult result, string? hash, bool replace = false, bool addResult = true, RotationRevision? rotation = null)
         {
-            var entry = new Entry(batch, DateTimeOffset.Now, result, hash);
+            var entry = new Entry(batch, DateTimeOffset.Now, result, hash, rotation);
             if (replace) history[^1] = entry;
             else history.Add(entry);
             Save(history);
@@ -121,38 +143,59 @@ public sealed class RenameService(string journalPath)
         }
     }
 
+    public bool HasUndoableOperations()
+    {
+        if (!File.Exists(journalPath)) return false;
+        try
+        {
+            using var lease = LockJournal();
+            var history = Load();
+            return history.TrueForAll(entry => entry?.Result is not null) && history.Exists(CanUndo);
+        }
+        catch (Exception ex) when (IsFileError(ex) || ex is JsonException or InvalidDataException)
+        {
+            return false;
+        }
+    }
+
     public IReadOnlyList<MoveResult> Undo()
     {
         using var lease = LockJournal();
         var history = Load();
-        var last = history.FindLast(e => e.Result.Status is MoveStatus.Moved or MoveStatus.Copied);
+        var last = history.FindLast(CanUndo);
         if (last is null) return [];
         var results = new List<MoveResult>();
         for (var index = history.Count - 1; index >= 0; index--)
         {
             var entry = history[index];
-            if (entry.Batch != last.Batch || entry.Result.Status is not (MoveStatus.Moved or MoveStatus.Copied)) continue;
+            if (entry.Batch != last.Batch || !CanUndo(entry)) continue;
             var plan = entry.Result;
-            var copied = plan.Status == MoveStatus.Copied;
             MoveResult result;
-            try
+            if (entry.Rotation is { } rotation)
             {
-                if (!copied && (File.Exists(plan.Source) || Directory.Exists(plan.Source) ||
-                    !string.Equals(Hash(plan.Target!), entry.Hash, StringComparison.Ordinal)))
+                result = UndoRotation(plan, entry.Hash!, rotation);
+            }
+            else
+            {
+                var copied = plan.Status == MoveStatus.Copied;
+                try
                 {
-                    result = plan with { Status = MoveStatus.Skipped, Message = "Исходный путь занят или PDF изменён." };
-                    RecordFailure(result);
+                    if (!copied && (File.Exists(plan.Source) || Directory.Exists(plan.Source) ||
+                        !string.Equals(Hash(plan.Target!), entry.Hash, StringComparison.Ordinal)))
+                    {
+                        RecordFailure(plan with { Status = MoveStatus.Skipped, Message = "Исходный путь занят или PDF изменён." });
+                        continue;
+                    }
+                }
+                catch (Exception ex) when (IsFileError(ex))
+                {
+                    RecordFailure(plan with { Status = MoveStatus.Failed, Message = Error(ex) });
                     continue;
                 }
+                history[index] = entry with { Result = plan with { Status = MoveStatus.UndoPending, Message = "Отмена начата." } };
+                Save(history);
+                result = copied ? RemoveCopy(plan, entry.Hash!) : Move(plan, undo: true);
             }
-            catch (Exception ex) when (IsFileError(ex))
-            {
-                RecordFailure(plan with { Status = MoveStatus.Failed, Message = Error(ex) });
-                continue;
-            }
-            history[index] = entry with { Result = plan with { Status = MoveStatus.UndoPending, Message = "Отмена начата." } };
-            Save(history);
-            result = copied ? RemoveCopy(plan, entry.Hash!) : Move(plan, undo: true);
             var undone = result.Status is MoveStatus.Undone or MoveStatus.CopyRemoved;
             history[index] = entry with { Result = undone ? result : plan };
             if (!undone) RecordFailure(result);
@@ -172,28 +215,128 @@ public sealed class RenameService(string journalPath)
         }
     }
 
+    private static bool CanUndo(Entry entry) => entry.Result.Status is MoveStatus.Moved or MoveStatus.Copied ||
+        entry.Result.Status == MoveStatus.Pending && entry.Rotation is not null && File.Exists(entry.Result.Target);
+
     private static MoveResult Copy(MoveResult plan, string hash)
     {
-        var temporary = Path.Combine(Path.GetDirectoryName(plan.Target)!, $".drawing-renamer-{Guid.NewGuid():N}.tmp");
-        var created = false;
         try
         {
             using (var input = File.OpenRead(plan.Source))
-            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            {
-                created = true;
-                input.CopyTo(output);
-                output.Flush(flushToDisk: true);
-            }
-            if (!string.Equals(Hash(temporary), hash, StringComparison.Ordinal))
-                return plan with { Status = MoveStatus.Failed, Message = "Исходный PDF изменился во время копирования." };
-            File.Move(temporary, plan.Target!, overwrite: false);
-            created = false;
+                WriteStaged(plan.Target!, output =>
+                {
+                    input.CopyTo(output);
+                    if (Hash(output) != hash)
+                        throw new InvalidDataException("Исходный PDF изменился во время копирования.");
+                });
             return plan with { Status = MoveStatus.Copied, Message = "Копия сохранена." };
         }
-        catch (Exception ex) when (IsFileError(ex))
+        catch (Exception ex) when (IsFileError(ex) || ex is InvalidDataException)
         {
             return plan with { Status = MoveStatus.Failed, Message = Error(ex) };
+        }
+    }
+
+    private static MoveResult SaveWithRotation(MoveResult plan, string hash, IReadOnlyDictionary<int, int> turns,
+        bool copy, Action<RotationRevision> recordPending)
+    {
+        try
+        {
+            using var input = new FileStream(plan.Source, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            WriteStaged(plan.Target!, output =>
+            {
+                PdfRenderer.SaveRotated(input, output, turns);
+                // Undo restores the original bytes from the saved PDF's previous revision.
+                if (output.Length <= input.Length || CopyPrefix(output, Stream.Null, input.Length) != hash)
+                    throw new InvalidDataException("Не удалось сохранить исходную версию PDF для отмены.");
+                recordPending(new(Hash(output), input.Length, copy));
+            });
+            if (copy) return plan with { Status = MoveStatus.Copied, Message = "Копия сохранена с поворотом листов." };
+
+            try
+            {
+                if (Hash(plan.Source) != hash)
+                    return plan with { Status = MoveStatus.Copied, Message = "PDF с поворотом сохранён. Исходный файл изменился и оставлен на месте." };
+                File.Delete(plan.Source);
+            }
+            catch (Exception ex) when (IsFileError(ex))
+            {
+                return plan with { Status = MoveStatus.Copied, Message = "PDF с поворотом сохранён. Не удалось удалить исходный файл." };
+            }
+            return plan with { Status = MoveStatus.Moved, Message = "Файл переименован с поворотом листов." };
+        }
+        catch (Exception ex) when (IsFileError(ex) || ex is InvalidDataException or DllNotFoundException or EntryPointNotFoundException)
+        {
+            return plan with { Status = MoveStatus.Failed, Message = Error(ex) };
+        }
+    }
+
+    private static MoveResult UndoRotation(MoveResult plan, string hash, RotationRevision rotation)
+    {
+        var copied = rotation.KeepSource || plan.Status == MoveStatus.Copied;
+        var skipped = plan with { Status = MoveStatus.Skipped, Message = "Исходный путь занят, исходный PDF отсутствует или PDF изменён." };
+        try
+        {
+            using var original = File.Exists(plan.Source) ? File.OpenRead(plan.Source) : null;
+            if (original is not null ? Hash(original) != hash : copied || Directory.Exists(plan.Source)) return skipped;
+
+            if (File.Exists(plan.Target) || original is null)
+            {
+                using var target = new FileStream(plan.Target!, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                if (Hash(target) != rotation.TargetHash) return skipped;
+                if (original is null)
+                {
+                    WriteStaged(plan.Source, output =>
+                    {
+                        if (CopyPrefix(target, output, rotation.OriginalLength) != hash)
+                            throw new InvalidDataException("Исходную версию PDF не удалось восстановить.");
+                    });
+                    if (Hash(plan.Target!) != rotation.TargetHash) return skipped;
+                }
+                File.Delete(plan.Target!);
+            }
+            return plan with { Status = copied ? MoveStatus.CopyRemoved : MoveStatus.Undone,
+                Message = copied ? "Созданная копия удалена." : "Исходный PDF восстановлен.",
+                PageRotations = copied ? null : plan.PageRotations?.ToDictionary(item => item.Key, item => 4 - item.Value) };
+        }
+        catch (Exception ex) when (IsFileError(ex) || ex is InvalidDataException)
+        {
+            return plan with { Status = MoveStatus.Failed, Message = Error(ex) };
+        }
+    }
+
+    private static string CopyPrefix(Stream input, Stream output, long length)
+    {
+        if (length <= 0 || length >= input.Length)
+            throw new InvalidDataException("Длина исходной версии PDF недействительна.");
+        input.Position = 0;
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[64 * 1024];
+        while (length > 0)
+        {
+            var block = buffer.AsSpan(0, (int)Math.Min(length, buffer.Length));
+            input.ReadExactly(block);
+            output.Write(block);
+            hash.AppendData(block);
+            length -= block.Length;
+        }
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private static void WriteStaged(string target, Action<FileStream> write)
+    {
+        var temporary = Path.Combine(Path.GetDirectoryName(target)!, $".drawing-renamer-{Guid.NewGuid():N}.tmp");
+        var created = false;
+        try
+        {
+            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+            {
+                created = true;
+                write(output);
+                output.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, target, overwrite: false);
+            created = false;
         }
         finally
         {
@@ -271,7 +414,13 @@ public sealed class RenameService(string journalPath)
     private static string Hash(string path)
     {
         using var file = File.OpenRead(path);
-        return Convert.ToHexString(SHA256.HashData(file));
+        return Hash(file);
+    }
+
+    private static string Hash(Stream stream)
+    {
+        stream.Position = 0;
+        return Convert.ToHexString(SHA256.HashData(stream));
     }
 
     private static bool IsFileError(Exception ex) => ex is IOException or UnauthorizedAccessException;
@@ -279,6 +428,8 @@ public sealed class RenameService(string journalPath)
     {
         FileNotFoundException or DirectoryNotFoundException => "Файл или папка отсутствует.",
         UnauthorizedAccessException => "Нет доступа к файлу.",
+        InvalidDataException => ex.Message,
+        DllNotFoundException or EntryPointNotFoundException => "Компонент PDFium для сохранения поворота недоступен.",
         _ => "Файл занят или целевой путь недоступен."
     };
 }

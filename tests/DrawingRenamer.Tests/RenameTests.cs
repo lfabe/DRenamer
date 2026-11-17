@@ -177,6 +177,32 @@ public sealed class RenameTests : IDisposable
     }
 
     [Fact]
+    public void UndoAvailabilityTracksRemainingBatchesAcrossRestarts()
+    {
+        var service = new RenameService(Journal);
+        Assert.False(service.HasUndoableOperations());
+        Assert.Equal(MoveStatus.Failed, Assert.Single(service.Execute([new(Path.Combine(root, "missing.pdf"), "A", "Cover")])).Status);
+        Assert.False(service.HasUndoableOperations());
+
+        Assert.Equal(MoveStatus.Moved, Assert.Single(service.Execute([new(Source("move.pdf"), "B", "Cover")])).Status);
+        Assert.Equal(MoveStatus.Copied, Assert.Single(service.Execute([new(Source("copy.pdf"), "C", "Cover")], destination: root)).Status);
+
+        var reopened = new RenameService(Journal);
+        Assert.True(reopened.HasUndoableOperations());
+        Assert.Equal(MoveStatus.CopyRemoved, Assert.Single(reopened.Undo()).Status);
+        Assert.True(reopened.HasUndoableOperations());
+        Assert.Equal(MoveStatus.Undone, Assert.Single(reopened.Undo()).Status);
+        Assert.False(reopened.HasUndoableOperations());
+    }
+
+    [Fact]
+    public void InvalidJournalDisablesUndoAvailability()
+    {
+        File.WriteAllText(Journal, "[null]");
+        Assert.False(new RenameService(Journal).HasUndoableOperations());
+    }
+
+    [Fact]
     public void UndoKeepsBothFilesWhenOriginalPathIsOccupied()
     {
         var path = Source("a.pdf");

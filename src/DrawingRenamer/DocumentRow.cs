@@ -22,7 +22,11 @@ public sealed partial class DocumentRow : ObservableObject
     public RecognitionResult? Result { get; private set; }
     public Candidate? SelectedCandidate { get; private set; }
     public IReadOnlyList<Candidate> Candidates => Result?.Candidates ?? [];
-    public RenameRequest Request => new(Source, Designation, DocumentName);
+    public Dictionary<int, int> PageRotations { get; } = [];
+    public RenameRequest Request => new(Source, Designation, DocumentName)
+    {
+        PageRotations = PageRotations.Count == 0 ? null : new Dictionary<int, int>(PageRotations)
+    };
     public string? NameError
     {
         get
@@ -67,6 +71,24 @@ public sealed partial class DocumentRow : ObservableObject
         Diagnostic = NameError ?? (candidate.OcrConfidence is { } confidence
             ? $"Лист {candidate.Page} · OCR {confidence:P0}. Проверьте обе графы."
             : $"Лист {candidate.Page} · Проверьте обе графы.");
+    }
+
+    public void ApplySavedRotations(IReadOnlyDictionary<int, int> rotations)
+    {
+        PageRotations.Clear();
+        if (Result is { } result) Result = result with { Candidates = result.Candidates.Select(Rotate).ToArray() };
+        if (SelectedCandidate is { } selected) SelectedCandidate = Rotate(selected);
+
+        Candidate Rotate(Candidate candidate)
+        {
+            if (!rotations.TryGetValue(candidate.Page, out var turns)) return candidate;
+            var regions = candidate.Regions;
+            return candidate with
+            {
+                Turn = (candidate.Turn + 4 - turns) % 4,
+                Regions = new(regions.Designation.Rotate(turns), regions.Name.Rotate(turns), regions.TitleBlock?.Rotate(turns))
+            };
+        }
     }
 
     public bool Confirm()

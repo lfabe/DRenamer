@@ -42,6 +42,61 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void SavesSelectedPageRotationsAndUndoesTheOperation(bool chooseFolder, bool copy)
+    {
+        var source = Pdf(Sheet(595, 842, 90), Sheet(595, 842, 180), Sheet(595, 842, 270));
+        var original = File.ReadAllBytes(source);
+        var destination = chooseFolder ? Directory.CreateDirectory(Path.Combine(folder, "output")).FullName : null;
+        var journal = Path.Combine(folder, "history.json");
+        var request = new RenameRequest(source, "A", "Cover")
+        {
+            PageRotations = new Dictionary<int, int> { [1] = 3, [2] = 1 }
+        };
+
+        var result = Assert.Single(new RenameService(journal).Execute([request], destination: destination,
+            removeOriginals: !copy));
+        Assert.True(result.Status == (copy ? MoveStatus.Copied : MoveStatus.Moved), result.Message);
+        Assert.Equal(copy, File.Exists(source));
+        if (copy) Assert.Equal(original, File.ReadAllBytes(source));
+        using (var saved = UglyToad.PdfPig.PdfDocument.Open(result.Target!))
+        {
+            Assert.Equal(new[] { 0, 270, 270 }, saved.GetPages().Select(page => page.Rotation.Value));
+            Assert.Contains("Main", saved.GetPage(1).Text);
+        }
+
+        var rotated = File.ReadAllBytes(result.Target!);
+        File.AppendAllText(result.Target!, "\n% Edited after saving");
+        Assert.Equal(MoveStatus.Skipped, Assert.Single(new RenameService(journal).Undo()).Status);
+        Assert.Equal(copy, File.Exists(source));
+        File.WriteAllBytes(result.Target!, rotated);
+
+        var undo = Assert.Single(new RenameService(journal).Undo());
+        Assert.True(undo.Status == (copy ? MoveStatus.CopyRemoved : MoveStatus.Undone), undo.Message);
+        if (!copy) Assert.Equal(1, undo.PageRotations![1]);
+        Assert.Equal(original, File.ReadAllBytes(source));
+        Assert.False(File.Exists(result.Target));
+    }
+
+    [Fact]
+    public void InvalidPageRotationLeavesTheSourceInPlace()
+    {
+        var source = Pdf(Sheet(595, 842, 0));
+        var original = File.ReadAllBytes(source);
+        var request = new RenameRequest(source, "A", "Cover")
+        {
+            PageRotations = new Dictionary<int, int> { [1] = 1, [2] = 2 }
+        };
+
+        var result = Assert.Single(new RenameService(Path.Combine(folder, "history.json")).Execute([request]));
+        Assert.Equal(MoveStatus.Failed, result.Status);
+        Assert.Equal(original, File.ReadAllBytes(source));
+        Assert.False(File.Exists(result.Target));
+    }
+
+    [Theory]
     [InlineData("scan-form1.pdf")]
     [InlineData("scan-rotated.pdf")]
     public void ScanUsesOfflineRussianOcrAndRequiresReview(string file)
@@ -53,6 +108,49 @@ public sealed class RecognitionTests : IDisposable
         Assert.Equal("OCR", candidate.Method);
         Assert.Equal("АБВГ.123456.001", candidate.Designation);
         Assert.Equal("Корпус основной", candidate.Name, ignoreCase: true);
+    }
+
+    [Fact]
+    public void ReadsAnInclinedDrawingFontInSelectedScanRegions()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "scan-italic.pdf");
+        var regions = new FieldRegions(new(.12, .08, .80, .25), new(.035, .345, .91, .625));
+        var candidate = new DrawingAnalyzer().ReadRegions(path, 1, regions, 0, new(), default);
+
+        Assert.Equal("АБВГ.123456.001", candidate.Designation);
+        Assert.Equal("Монтаж оборудования системы отопления", candidate.Name);
+        Assert.Equal("OCR", candidate.Method);
+        Assert.False(candidate.Verified);
+    }
+
+    [Fact]
+    public void ReadsDesignationInAFadedInclinedScan()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "scan-italic-faded.pdf");
+        var regions = new FieldRegions(new(.12, .08, .80, .25), new(.035, .345, .91, .625));
+        var candidate = new DrawingAnalyzer().ReadRegions(path, 1, regions, 0, new(), default);
+
+        Assert.Equal("АБВГ.123456.001", candidate.Designation);
+        Assert.False(candidate.Verified);
+    }
+
+    [Theory]
+    [InlineData("rus+eng", "С1")]
+    [InlineData("eng", "C1")]
+    public void PrefersCyrillicForAmbiguousOcrGlyphsWhenRussianIsEnabled(string languages, string expected)
+    {
+        var path = Pdf(new Page(240, 122, 0, """
+            3 w 1 J 1 j
+            110 74 m 106 78 103 79 98 79 c 88 79 83 71 83 62 c
+            83 53 88 45 98 45 c 103 45 106 46 110 50 c S
+            122 71 m 131 79 l 131 45 l S
+            """));
+        var candidate = new DrawingAnalyzer().ReadRegions(path, 1, new(Area.Full, Area.Full), 0,
+            new(Languages: languages), default);
+
+        Assert.Equal(expected, candidate.Designation);
+        Assert.Equal(expected, candidate.Name);
+        Assert.Equal("OCR", candidate.Method);
     }
 
     [Theory]

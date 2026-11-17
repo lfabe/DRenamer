@@ -2,6 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
+    <PdfFixtureDirectory>$(BaseIntermediateOutputPath)$(Configuration)/$(TargetFramework)/fixtures</PdfFixtureDirectory>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/DrawingRenamer.Core/DrawingRenamer.Core.csproj" />
@@ -9,6 +10,13 @@
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
     <Using Include="Xunit" />
-    <None Include="../fixtures/*.pdf" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <PdfFixtureName Include="outline-form1.pdf;protected.pdf;scan-form1.pdf;scan-italic.pdf;scan-italic-faded.pdf;scan-rotated.pdf" />
+    <PdfFixture Include="@(PdfFixtureName->'$(PdfFixtureDirectory)/%(Identity)')" />
+    <None Include="@(PdfFixture)" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <Target Name="GeneratePdfFixtures" BeforeTargets="PrepareForBuild"
+          Inputs="../fixtures/generate_scan.py;../fixtures/scan-italic.jpg;../fixtures/scan-italic-faded.jpg"
+          Outputs="@(PdfFixture)">
+    <Exec Command="python &quot;../fixtures/generate_scan.py&quot; --output &quot;$(PdfFixtureDirectory)&quot;" />
+  </Target>
 </Project>

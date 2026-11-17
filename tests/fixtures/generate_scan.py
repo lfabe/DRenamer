@@ -1,5 +1,5 @@
 """Generate PDF fixtures. Requires Pillow, pypdf and fonttools."""
-from io import BytesIO
+import argparse
 from pathlib import Path
 
 from fontTools.pens.qu2cuPen import Qu2CuPen
@@ -8,13 +8,13 @@ from fontTools.svgLib.path import parse_path
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import DecodedStreamObject, NameObject
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, NumberObject
 
 FOLDER = Path(__file__).resolve().parent
 FONT = "C:/Windows/Fonts/arial.ttf"
 
 
-def scan():
+def scan(output):
     image = Image.new("RGB", (1650, 2340), "white")
     draw = ImageDraw.Draw(image)
     left, top, right, bottom = 158, 1868, 1611, 2300
@@ -28,7 +28,7 @@ def scan():
     draw.text((780, 1894), "АБВГ.123456.001", font=font, fill="black")
     draw.text((738, 2010), "Корпус", font=font, fill="black")
     draw.text((738, 2084), "основной", font=font, fill="black")
-    image.save(FOLDER / "scan-form1.pdf", resolution=200)
+    image.save(output / "scan-form1.pdf", resolution=200)
 
 
 class PdfPen:
@@ -55,7 +55,7 @@ class PdfPen:
         pass
 
 
-def outlines():
+def outlines(output):
     with TTFont(FONT) as font:
         glyphs = font.getGlyphSet()
         cmap = font.getBestCmap()
@@ -81,22 +81,53 @@ def outlines():
     stream = DecodedStreamObject()
     stream.set_data("\n".join(content).encode("ascii"))
     page[NameObject("/Contents")] = writer._add_object(stream)
-    writer.write(FOLDER / "outline-form1.pdf")
+    writer.write(output / "outline-form1.pdf")
+
+
+def inclined_scan(output, name):
+    source = FOLDER / f"{name}.jpg"
+    with Image.open(source) as image:
+        width, height = image.size
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(155.52, 57.6)
+    scan_image = DecodedStreamObject()
+    scan_image.set_data(source.read_bytes())
+    scan_image.update({
+        NameObject("/Type"): NameObject("/XObject"),
+        NameObject("/Subtype"): NameObject("/Image"),
+        NameObject("/Width"): NumberObject(width),
+        NameObject("/Height"): NumberObject(height),
+        NameObject("/ColorSpace"): NameObject("/DeviceGray"),
+        NameObject("/BitsPerComponent"): NumberObject(8),
+        NameObject("/Filter"): NameObject("/DCTDecode"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/XObject"): DictionaryObject({NameObject("/Scan"): writer._add_object(scan_image)})
+    })
+    stream = DecodedStreamObject()
+    stream.set_data(b"q 155.52 0 0 57.6 0 0 cm /Scan Do Q")
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    writer.write(output / f"{name}.pdf")
 
 
 def main():
-    scan()
-    source = PdfReader(FOLDER / "scan-form1.pdf")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    output = parser.parse_args().output
+    output.mkdir(parents=True, exist_ok=True)
+    scan(output)
+    source = PdfReader(output / "scan-form1.pdf")
     writer = PdfWriter()
     writer.add_page(source.pages[0]).rotate(90)
-    writer.write(FOLDER / "scan-rotated.pdf")
+    writer.write(output / "scan-rotated.pdf")
     locked = PdfWriter()
     locked.add_page(source.pages[0])
     locked.encrypt("fixture-password", algorithm="RC4-128")
-    with BytesIO() as buffer:
-        locked.write(buffer)
-        (FOLDER / "protected.pdf").write_bytes(buffer.getvalue())
-    outlines()
+    locked.write(output / "protected.pdf")
+    outlines(output)
+    inclined_scan(output, "scan-italic")
+    inclined_scan(output, "scan-italic-faded")
 
 
 if __name__ == "__main__":

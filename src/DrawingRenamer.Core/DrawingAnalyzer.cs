@@ -213,7 +213,7 @@ public sealed class DrawingAnalyzer
         var englishFirst = false;
         if (designation.Length == 0)
         {
-            var result = Read(candidate.Regions.Designation);
+            var result = Read(candidate.Regions.Designation, isDesignation: true);
             designation = NormalizeDesignation(result.Text, ocr: true);
             confidence = result.Confidence;
             englishFirst = designation.Any(c => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z') &&
@@ -221,15 +221,16 @@ public sealed class DrawingAnalyzer
         }
         if (name.Length == 0 && candidate.Regions.Name.IsValid)
         {
-            var result = Read(candidate.Regions.Name, englishFirst);
+            var result = Read(candidate.Regions.Name, preferEnglish: englishFirst);
             name = NormalizeName(result.Text);
             confidence = Math.Min(confidence, result.Confidence);
         }
         return candidate with { Designation = designation, Name = name, Method = "OCR",
             OcrConfidence = confidence, Verified = false };
 
-        (string Text, double Confidence) Read(Area region, bool preferEnglish = false) => ocr.Read(
-            renderer.Render(path, candidate.Page, region.Inset(.017), 1450, token), candidate.Turn, token, preferEnglish);
+        (string Text, double Confidence) Read(Area region, bool preferEnglish = false, bool isDesignation = false) =>
+            ocr.Read(renderer.Render(path, candidate.Page, region.Inset(.017), 1450, token),
+                candidate.Turn, token, preferEnglish, isDesignation);
     }
 
     public static string NormalizeName(string value) => Regex.Replace(value.Normalize(NormalizationForm.FormC),
@@ -271,21 +272,78 @@ public sealed class DrawingAnalyzer
 
     private sealed class OcrReader(RecognitionOptions options) : IDisposable
     {
+        private readonly bool russianEnabled = options.Languages.Split('+').Contains("rus");
         private Engine? engine;
         private Engine? englishFirstEngine;
 
-        public (string Text, double Confidence) Read(Raster raster, int turn, CancellationToken token, bool preferEnglish)
+        public (string Text, double Confidence) Read(Raster raster, int turn, CancellationToken token,
+            bool preferEnglish, bool isDesignation)
         {
             token.ThrowIfCancellationRequested();
             var data = Path.Combine(AppContext.BaseDirectory, "tessdata");
             var reader = preferEnglish && options.Languages == "rus+eng"
                 ? englishFirstEngine ??= new Engine(data, "eng+rus", EngineMode.LstmOnly)
                 : engine ??= new Engine(data, options.Languages, EngineMode.LstmOnly);
-            using var image = TesseractOCR.Pix.Image.LoadFromMemory(raster.ToBmp(turn));
-            using var page = reader.Process(image, PageSegMode.SingleBlock);
-            token.ThrowIfCancellationRequested();
-            return (page.Text, page.MeanConfidence);
+            var best = Recognize(0);
+            if (best.Confidence < .85)
+            {
+                // Drawing fonts are often inclined at about 15 degrees; scans can distort the slope.
+                foreach (var shear in new[] { .20, .27 })
+                {
+                    var corrected = Recognize(shear);
+                    if (corrected.Confidence > best.Confidence && !string.IsNullOrWhiteSpace(corrected.Text))
+                        best = corrected;
+                }
+            }
+
+            // A broad crop can enlarge thin strokes and scan noise. Retry a single designation line at two scales.
+            if (isDesignation && best.Confidence < .90 && !best.Text.Trim().Contains('\n'))
+            {
+                token.ThrowIfCancellationRequested();
+                using var upright = TesseractOCR.Pix.Image.LoadFromMemory(raster.ToBmp(turn, .25));
+                using var gray = upright.ConvertRGBToGray();
+                foreach (var scale in new[] { .60f, .75f })
+                {
+                    token.ThrowIfCancellationRequested();
+                    using var scaled = gray.Scale(scale, scale);
+                    var corrected = Process(scaled, PageSegMode.SingleLine);
+                    var text = NormalizeDesignation(corrected.Text, ocr: true);
+                    if (corrected.Confidence > best.Confidence + .01 && text.Length > 0 &&
+                        text.IndexOfAny(Path.GetInvalidFileNameChars()) < 0)
+                        best = corrected;
+                }
+            }
+
+            return russianEnabled ? (PreferCyrillic(best.Text), best.Confidence) : best;
+
+            (string Text, double Confidence) Recognize(double shear)
+            {
+                token.ThrowIfCancellationRequested();
+                using var image = TesseractOCR.Pix.Image.LoadFromMemory(raster.ToBmp(turn, shear));
+                return Process(image, PageSegMode.SingleBlock);
+            }
+
+            (string Text, double Confidence) Process(TesseractOCR.Pix.Image image, PageSegMode mode)
+            {
+                using var page = reader.Process(image, mode);
+                token.ThrowIfCancellationRequested();
+                return (page.Text, page.MeanConfidence);
+            }
         }
+
+        private static string PreferCyrillic(string text) => Regex.Replace(text, @"[\p{L}\p{M}\d]+", match =>
+        {
+            const string latin = "ABCEHKMOPTXYaceopxy";
+            const string cyrillic = "АВСЕНКМОРТХУасеорху";
+            if (match.Value.Any(c => char.IsLetter(c) && c is not (>= '\u0400' and <= '\u052f') && !latin.Contains(c)))
+                return match.Value;
+
+            return string.Concat(match.Value.Select(c =>
+            {
+                var index = latin.IndexOf(c);
+                return index >= 0 ? cyrillic[index] : c;
+            }));
+        });
 
         public void Dispose()
         {
