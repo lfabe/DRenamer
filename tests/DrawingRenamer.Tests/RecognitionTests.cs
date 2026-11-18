@@ -18,6 +18,7 @@ public sealed class RecognitionTests : IDisposable
     {
         var path = Pdf(Sheet(width, height, rotation));
         var result = new DrawingAnalyzer().Analyze(path, new(OcrEnabled: false), default);
+        Assert.Equal(RenameService.Hash(path), result.SourceHash);
         Assert.Equal(RecognitionStatus.Ready, result.Status);
         var candidate = Assert.Single(result.Candidates);
         Assert.Equal("ABCD.123456.001", candidate.Designation);

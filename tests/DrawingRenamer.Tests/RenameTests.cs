@@ -312,5 +312,94 @@ public sealed class RenameTests : IDisposable
         Assert.Equal("modified", File.ReadAllText(moved.Target!));
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void ReplacedSourceRequiresReviewEvenWithSameSizeAndTimestamp(bool copy, bool rotate)
+    {
+        var path = Source("source.pdf", "first");
+        var stamp = File.GetLastWriteTimeUtc(path);
+        var request = new RenameRequest(path, "A", "COVER")
+        {
+            ExpectedHash = RenameService.Hash(path),
+            PageRotations = rotate ? new Dictionary<int, int> { [1] = 1 } : null
+        };
+        File.WriteAllText(path, "other");
+        File.SetLastWriteTimeUtc(path, stamp);
+
+        var service = new RenameService(Journal);
+        var result = Assert.Single(service.Execute([request], destination: copy ? root : null));
+        Assert.Equal(MoveStatus.Skipped, result.Status);
+        Assert.True(result.SourceChanged);
+        Assert.Equal("other", File.ReadAllText(path));
+        Assert.False(File.Exists(result.Target));
+        Assert.False(service.HasUndoableOperations());
+    }
+
+    [Fact]
+    public void MoveChecksTheOpenedFileAfterRecordingIntent()
+    {
+        var source = Source("first.pdf");
+        var request = new RenameRequest(source, "A", "COVER") { ExpectedHash = RenameService.Hash(source) };
+        var service = new RenameService(Journal, (temporary, journal) =>
+        {
+            if (!File.Exists(journal)) File.WriteAllText(source, "updated before move");
+            File.Move(temporary, journal, overwrite: true);
+        });
+
+        var result = Assert.Single(service.Execute([request]));
+        Assert.True(result.SourceChanged);
+        Assert.Equal(MoveStatus.Skipped, result.Status);
+        Assert.Equal("updated before move", File.ReadAllText(source));
+        Assert.False(File.Exists(result.Target));
+    }
+
+    [Fact]
+    public void VerifiedHandlePreventsReplacementUntilDeleteCompletes()
+    {
+        var path = Source("target.pdf");
+        var replacement = Source("replacement.pdf", "updated");
+        var expected = RenameService.Hash(path);
+        using (var verified = WindowsFile.OpenForMove(path))
+        {
+            Assert.Equal(expected, RenameService.Hash(verified));
+            var denied = Record.Exception(() => File.Move(replacement, path, overwrite: true));
+            Assert.True(denied is IOException or UnauthorizedAccessException);
+            WindowsFile.Delete(verified);
+        }
+        Assert.False(File.Exists(path));
+        Assert.Equal("updated", File.ReadAllText(replacement));
+    }
+
+    [Fact]
+    public void JournalFailureReturnsCompletedMovesAndKeepsUndoInMemory()
+    {
+        var first = Source("first.pdf");
+        var next = Source("next.pdf");
+        var target = Path.Combine(root, "A_COVER.pdf");
+        var failWrites = false;
+        var service = new RenameService(Journal, (temporary, journal) =>
+        {
+            failWrites |= File.Exists(target);
+            using var reader = failWrites ? File.OpenRead(journal) : null;
+            File.Move(temporary, journal, overwrite: true);
+        });
+
+        var failure = Assert.Throws<JournalWriteException>(() => service.Execute(
+            [new(first, "A", "COVER"), new(next, "B", "COVER")]));
+        Assert.Equal(MoveStatus.Moved, Assert.Single(failure.Completed).Status);
+        Assert.True(File.Exists(target));
+        Assert.False(File.Exists(first));
+        Assert.True(File.Exists(next));
+        Assert.True(service.HasUndoableOperations());
+
+        var undo = Assert.Throws<JournalWriteException>(() => service.Undo());
+        Assert.Equal(MoveStatus.Undone, Assert.Single(undo.Completed).Status);
+        Assert.True(File.Exists(first));
+        Assert.False(File.Exists(target));
+        Assert.False(service.HasUndoableOperations());
+    }
+
     public void Dispose() => Directory.Delete(root, recursive: true);
 }

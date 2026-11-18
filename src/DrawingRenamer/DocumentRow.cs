@@ -20,11 +20,13 @@ public sealed partial class DocumentRow : ObservableObject
 
     public string OriginalName => Path.GetFileName(Source);
     public RecognitionResult? Result { get; private set; }
+    public string? SourceHash { get; private set; }
     public Candidate? SelectedCandidate { get; private set; }
     public IReadOnlyList<Candidate> Candidates => Result?.Candidates ?? [];
     public Dictionary<int, int> PageRotations { get; } = [];
     public RenameRequest Request => new(Source, Designation, DocumentName)
     {
+        ExpectedHash = SourceHash ?? throw new InvalidOperationException("Сначала подтвердите версию PDF."),
         PageRotations = PageRotations.Count == 0 ? null : new Dictionary<int, int>(PageRotations)
     };
     public string? NameError
@@ -38,13 +40,15 @@ public sealed partial class DocumentRow : ObservableObject
 
     public void Apply(RecognitionResult result)
     {
+        if (SourceHash != result.SourceHash) PageRotations.Clear();
+        SourceHash = result.SourceHash;
         Result = result;
         SelectedCandidate = null;
         Designation = "";
         DocumentName = "";
         if (result.Candidates.Count == 1) Use(result.Candidates[0]);
         var error = result.Candidates.Count == 1 ? NameError : null;
-        Confirmed = result.Status == RecognitionStatus.Ready && result.Candidates.Count == 1 && error is null;
+        Confirmed = SourceHash is not null && result.Status == RecognitionStatus.Ready && result.Candidates.Count == 1 && error is null;
         if (result.Candidates is [{ Regions.Name.IsValid: false }])
             Diagnostic = result.Diagnostic;
         else if (error is not null)
@@ -73,10 +77,11 @@ public sealed partial class DocumentRow : ObservableObject
             : $"Лист {candidate.Page} · Проверьте обе графы.");
     }
 
-    public void ApplySavedRotations(IReadOnlyDictionary<int, int> rotations)
+    public void ApplySavedRotations(IReadOnlyDictionary<int, int> rotations, string hash)
     {
+        SourceHash = hash;
         PageRotations.Clear();
-        if (Result is { } result) Result = result with { Candidates = result.Candidates.Select(Rotate).ToArray() };
+        if (Result is { } result) Result = result with { SourceHash = hash, Candidates = result.Candidates.Select(Rotate).ToArray() };
         if (SelectedCandidate is { } selected) SelectedCandidate = Rotate(selected);
 
         Candidate Rotate(Candidate candidate)
@@ -91,8 +96,30 @@ public sealed partial class DocumentRow : ObservableObject
         }
     }
 
-    public bool Confirm()
+    public bool ObserveVersion(string? hash)
     {
+        if (hash is null)
+        {
+            Confirmed = false;
+            Status = "Проверить";
+            Diagnostic = "Не удалось проверить версию исходного PDF.";
+            return false;
+        }
+        if (SourceHash is null || SourceHash == hash)
+        {
+            SourceHash = hash;
+            return true;
+        }
+        InvalidateVersion(hash);
+        return false;
+    }
+
+    public void InvalidateVersion(string? hash = null) =>
+        Apply(new(RecognitionStatus.Review, 0, [], "PDF изменился. Проверьте графы заново.") { SourceHash = hash });
+
+    public bool Confirm(string hash)
+    {
+        if (!ObserveVersion(hash)) return false;
         var error = NameError;
         Confirmed = error is null;
         Status = Confirmed ? "Подтверждено" : "Проверить";

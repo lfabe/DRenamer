@@ -136,6 +136,9 @@ public sealed partial class MainViewModel : ObservableObject
             var selected = Selected;
             foreach (var row in Rows.Where(row => !paths.Contains(row.Source)).ToArray())
                 Rows.Remove(row);
+            var reviewed = Rows.Where(row => row.SourceHash is not null).ToArray();
+            var versions = await Task.Run(() => reviewed.Select(row => ReadVersion(row.Source)).ToArray());
+            for (var i = 0; i < reviewed.Length; i++) reviewed[i].ObserveVersion(versions[i]);
             AddRows(paths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
             Selected = selected is not null && Rows.Contains(selected) ? selected : Rows.FirstOrDefault();
             Message = $"Найдено документов: {Rows.Count}.";
@@ -188,11 +191,36 @@ public sealed partial class MainViewModel : ObservableObject
         var options = Options;
         await WorkAsync(async () =>
         {
-            var candidate = await Task.Run(() => analyzer.ReadRegions(row.Source, page, regions, turn, options, default));
+            var (hash, candidate) = await Task.Run(() =>
+            {
+                using var input = File.OpenRead(row.Source);
+                var version = RenameService.Hash(input);
+                return (version, row.SourceHash is { } previous && previous != version ? null :
+                    analyzer.ReadRegions(row.Source, page, regions, turn, options, default));
+            });
+            if (!row.ObserveVersion(hash) || candidate is null) { Message = row.Diagnostic; return; }
             row.Use(candidate);
             Message = "Проверьте результат и подтвердите значения.";
         });
     }
+
+    private static string? ReadVersion(string path)
+    {
+        try { return RenameService.Hash(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    public Task ConfirmAsync(DocumentRow row) => WorkAsync(async () =>
+    {
+        var hash = await Task.Run(() => ReadVersion(row.Source));
+        if (hash is null)
+        {
+            row.ObserveVersion(null);
+            Message = row.Diagnostic;
+            return;
+        }
+        Message = row.Confirm(hash) ? "Значения подтверждены." : row.Diagnostic;
+    });
 
     public async Task MoveAsync(IReadOnlyList<RenameRequest>? requests, IReadOnlyList<MoveResult>? skipped = null,
         string? destination = null, bool removeOriginals = false)
@@ -200,10 +228,16 @@ public sealed partial class MainViewModel : ObservableObject
         await WorkAsync(async () =>
         {
             IReadOnlyList<MoveResult> results;
+            string? journalWarning = null;
             try
             {
                 results = await Task.Run(() => requests is null
                     ? Renamer.Undo() : Renamer.Execute(requests, skipped, destination, removeOriginals));
+            }
+            catch (JournalWriteException ex)
+            {
+                results = ex.Completed;
+                journalWarning = ex.Message;
             }
             finally
             {
@@ -222,11 +256,13 @@ public sealed partial class MainViewModel : ObservableObject
                     individualFiles.Add(newPath);
                     if (row is not null)
                     {
-                        if (result.PageRotations is { } rotations) row.ApplySavedRotations(rotations);
+                        if (result.PageRotations is { Count: > 0 } rotations && result.ResultHash is { } hash)
+                            row.ApplySavedRotations(rotations, hash);
                         row.Source = newPath;
                     }
                 }
                 if (row is null) continue;
+                if (result.SourceChanged) row.InvalidateVersion();
                 row.Diagnostic = result.Message;
                 row.Status = result.Status switch
                 {
@@ -242,6 +278,7 @@ public sealed partial class MainViewModel : ObservableObject
             }
             Message = results.Count == 0 ? "Нет выполненных операций." :
                 $"Выполнено: {results.Count(r => r.Status is MoveStatus.Moved or MoveStatus.Undone or MoveStatus.Copied or MoveStatus.CopyRemoved)} из {results.Count}.";
+            if (journalWarning is not null) Message = $"{journalWarning} {Message}";
         });
     }
 

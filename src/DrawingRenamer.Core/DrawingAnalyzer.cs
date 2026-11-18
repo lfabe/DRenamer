@@ -13,7 +13,10 @@ public sealed record RecognitionOptions(bool OcrEnabled = true, string Languages
 public sealed record Candidate(string Designation, string Name, int Page, int Turn, FieldRegions Regions,
     string Method, double? OcrConfidence = null, bool Verified = false);
 public sealed record RecognitionResult(RecognitionStatus Status, int PageCount, IReadOnlyList<Candidate> Candidates,
-    string Diagnostic);
+    string Diagnostic)
+{
+    public string? SourceHash { get; init; }
+}
 
 public sealed class DrawingAnalyzer
 {
@@ -30,9 +33,14 @@ public sealed class DrawingAnalyzer
         string? failure = null;
         using var ocr = new OcrReader(options);
         var templates = options.Templates ?? TitleTemplate.Defaults;
+        string? sourceHash;
         try
         {
-            using var document = PdfDocument.Open(path);
+            token.ThrowIfCancellationRequested();
+            using var input = File.OpenRead(path);
+            sourceHash = RenameService.Hash(input);
+            input.Position = 0;
+            using var document = PdfDocument.Open(input);
             pages = document.NumberOfPages;
             for (var number = 1; number <= pages; number++)
             {
@@ -134,7 +142,7 @@ public sealed class DrawingAnalyzer
             _ when locatedTitle => "Штамп найден, но графы не прочитаны. Заполните пустые графы вручную или выделите текст на листе.",
             _ => "Графы не распознаны. Выделите их на листе или введите данные."
         };
-        return new(status, pages, pairs, diagnostic);
+        return new(status, pages, pairs, diagnostic) { SourceHash = sourceHash };
     }
 
     public Candidate ReadRegions(string path, int page, FieldRegions regions, int turn,

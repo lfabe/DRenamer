@@ -303,15 +303,18 @@ public sealed partial class MainWindow : Window
             var knownCount = row.Result?.PageCount;
             var result = await Task.Run(() =>
             {
+                using var input = File.OpenRead(path);
+                var hash = RenameService.Hash(input);
                 var count = knownCount.GetValueOrDefault();
                 if (count < 1)
                 {
                     using var document = UglyToad.PdfPig.PdfDocument.Open(path);
                     count = document.NumberOfPages;
                 }
-                return (count, raster: renderer.Render(path, number, Area.Full, 1800, operation.Token));
+                return (count, hash, raster: renderer.Render(path, number, Area.Full, 1800, operation.Token));
             });
             operation.Token.ThrowIfCancellationRequested();
+            if (!row.ObserveVersion(result.hash)) return;
             var pixels = result.raster.Pixels;
             using var writer = new DataWriter();
             writer.WriteBytes(pixels);
@@ -532,10 +535,10 @@ public sealed partial class MainWindow : Window
         PaintRegions();
     }
 
-    private void ConfirmValues(object sender, RoutedEventArgs e)
+    private async void ConfirmValues(object sender, RoutedEventArgs e)
     {
         if (ViewModel.Busy || renaming || choosingDocuments || current is not { } row) return;
-        ViewModel.Message = row.Confirm() ? "Значения подтверждены." : row.Diagnostic;
+        await ViewModel.ConfirmAsync(row);
     }
 
     private async void SaveRegions(object sender, RoutedEventArgs e) => await ExportRegionsAsync();
