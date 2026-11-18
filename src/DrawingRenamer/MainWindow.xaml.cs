@@ -51,7 +51,8 @@ public sealed partial class MainWindow : Window
         };
         Root.AddHandler(UIElement.DragOverEvent, new DragEventHandler(DocumentsDragOver), true);
         Root.AddHandler(UIElement.DropEvent, new DragEventHandler(DocumentsDropped), true);
-        Title = "Drawing Renamer";
+        var version = typeof(MainWindow).Assembly.GetName().Version;
+        Title = version is null ? "Drawing Renamer" : $"Drawing Renamer v{version.ToString(3)}";
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "DrawingRenamer.ico"));
         AppWindow.Resize(new(1320, 820));
         ViewModel.PropertyChanged += ViewModelChanged;
