@@ -9,6 +9,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly DrawingAnalyzer analyzer = new();
     private readonly HashSet<string> folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> individualFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> excludedFiles = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? cancellation;
     private static readonly string DataFolder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DrawingRenamer");
@@ -60,6 +61,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (Busy) return Task.CompletedTask;
         var pdfs = files.Where(IsPdf).Select(path => Path.GetFullPath(path)).ToArray();
         var sources = directories.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path))).ToArray();
+        excludedFiles.ExceptWith(pdfs);
         individualFiles.UnionWith(pdfs);
         if (sources.Length > 0)
         {
@@ -71,6 +73,21 @@ public sealed partial class MainViewModel : ObservableObject
         Message = pdfs.Length == 0 ? "Добавьте PDF-файлы или папки."
             : $"Добавлено: {count}. В очереди: {Rows.Count}.";
         return Task.CompletedTask;
+    }
+
+    public void RemoveDocument(DocumentRow row)
+    {
+        if (Busy) return;
+        var index = Rows.IndexOf(row);
+        if (index < 0) return;
+
+        var wasSelected = Selected == row;
+        individualFiles.Remove(row.Source);
+        excludedFiles.Add(row.Source);
+        Rows.RemoveAt(index);
+        if (wasSelected)
+            Selected = Rows.Count == 0 ? null : Rows[Math.Min(index, Rows.Count - 1)];
+        Message = $"Удалено из списка: {row.OriginalName}.";
     }
 
     private int AddRows(IEnumerable<string> paths)
@@ -107,7 +124,11 @@ public sealed partial class MainViewModel : ObservableObject
                 };
                 foreach (var folder in folders)
                 {
-                    try { discovered.UnionWith(Directory.EnumerateFiles(folder, "*", options).Where(IsPdf)); }
+                    try
+                    {
+                        discovered.UnionWith(Directory.EnumerateFiles(folder, "*", options)
+                            .Where(path => IsPdf(path) && !excludedFiles.Contains(path)));
+                    }
                     catch (DirectoryNotFoundException) { }
                 }
                 return discovered;

@@ -216,6 +216,21 @@ public sealed partial class MainWindow : Window
         if (((ComboBox)sender).SelectedItem is ComboBoxItem { Tag: string value }) ViewModel.Languages = value;
     }
 
+    private void RemoveDocumentFromMenu(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments && sender is MenuFlyoutItem { Tag: DocumentRow row })
+            ViewModel.RemoveDocument(row);
+    }
+
+    private void DocumentsKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != Windows.System.VirtualKey.Delete || !CanChangeDocuments ||
+            Documents.SelectedItem is not DocumentRow row) return;
+        e.Handled = true;
+        ViewModel.RemoveDocument(row);
+        Documents.Focus(FocusState.Keyboard);
+    }
+
     private async void SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (current is not null) current.PropertyChanged -= RowChanged;
@@ -516,11 +531,10 @@ public sealed partial class MainWindow : Window
         PaintRegions();
     }
 
-    private async void ConfirmValues(object sender, RoutedEventArgs e)
+    private void ConfirmValues(object sender, RoutedEventArgs e)
     {
         if (ViewModel.Busy || renaming || choosingDocuments || current is not { } row) return;
-        if (row.Confirm()) ViewModel.Message = "Значения подтверждены.";
-        await ExportRegionsAsync();
+        ViewModel.Message = row.Confirm() ? "Значения подтверждены." : row.Diagnostic;
     }
 
     private async void SaveRegions(object sender, RoutedEventArgs e) => await ExportRegionsAsync();

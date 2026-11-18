@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace DrawingRenamer.Tests;
 
 public sealed class RenameTests : IDisposable
@@ -12,32 +14,71 @@ public sealed class RenameTests : IDisposable
     }
 
     [Theory]
-    [InlineData("A/B", "Part")]
+    [InlineData("A/B", "PART")]
     [InlineData("CON", "")]
-    [InlineData("NUL.txt", "Part")]
-    [InlineData("COM¹.details", "Part")]
-    [InlineData("A", "Part?")]
-    [InlineData("A\tB", "Part")]
+    [InlineData("NUL.TXT", "PART")]
+    [InlineData("COM1.DETAILS", "PART")]
+    [InlineData("A", "PART?")]
+    [InlineData("A\tB", "PART")]
     public void RejectsInvalidWindowsNames(string designation, string title) =>
         Assert.Null(RenameService.FileName(designation, title));
 
     [Fact]
+    public void AllowsTheSameDrawingCharactersInBothFields() =>
+        Assert.Equal("АБВГ.123456.001 СБ ‒ A_ЧЕРТЁЖ 2.1 ‒ B.pdf",
+            RenameService.FileName("АБВГ.123456.001 СБ ‒ A", "ЧЕРТЁЖ 2.1 ‒ B"));
+
+    [Theory]
+    [InlineData("AB_01")]
+    [InlineData("AB/01")]
+    [InlineData("AB-01")]
+    [InlineData("AB–01")]
+    [InlineData("AB\u00A001")]
+    [InlineData("AB\u0080")]
+    public void RejectsUnsupportedDrawingCharactersInEitherField(string value)
+    {
+        Assert.Null(RenameService.FileName(value, "PART", out var designationError));
+        Assert.Contains("«Обозначение»", designationError);
+        Assert.Null(RenameService.FileName("AB", value, out var titleError));
+        Assert.Contains("«Наименование»", titleError);
+    }
+
+    [Theory]
+    [InlineData("Assembly housing")]
+    [InlineData("Схема чертёжа")]
+    public void AllowsLowercaseInTheTitleOnly(string value)
+    {
+        Assert.Equal($"AB_{value}.pdf", RenameService.FileName("AB", value));
+        Assert.Null(RenameService.FileName(value, "PART", out var designationError));
+        Assert.Contains("«Обозначение» — строчные буквы", designationError);
+    }
+
+    [Theory]
+    [InlineData("'", "U+0027")]
+    [InlineData("‘", "U+2018")]
+    public void ReportsTheActualForbiddenSymbolsInBothFields(string quote, string code)
+    {
+        var name = RenameService.FileName("ФПО.Т0-14.00.000 С1", $"Схема {quote}оборудования", out var error);
+
+        Assert.Null(name);
+        Assert.Contains("«Обозначение» — «-» (U+002D)", error);
+        Assert.Contains($"«Наименование» — «{quote}» ({code})", error);
+        Assert.DoesNotContain("строчные буквы", error);
+    }
+
+    [Fact]
     public void ChecksLengthOfCompleteWindowsFileName()
     {
-        var designation = new string('A', 247);
+        var designation = new string('A', 249);
         Assert.Equal(255, RenameService.FileName(designation, "7")!.Length);
         Assert.Null(RenameService.FileName(designation, "77"));
     }
 
     [Fact]
-    public void AllowsUnicodeOutsideTheWindowsForbiddenControlRange() =>
-        Assert.Equal("A\u0080 - Part.pdf", RenameService.FileName("A\u0080", "Part"));
-
-    [Fact]
     public void PreviewExplainsWhichFieldsContainForbiddenWindowsCharacters()
     {
         var source = Source("a.pdf");
-        var result = Assert.Single(RenameService.Preview([new(source, "A\"\"\"B", "Part?")]));
+        var result = Assert.Single(RenameService.Preview([new(source, "A\"\"\"B", "PART?")]));
 
         Assert.Equal(MoveStatus.Skipped, result.Status);
         Assert.Null(result.Target);
@@ -52,15 +93,15 @@ public sealed class RenameTests : IDisposable
     {
         var source = Source("a.pdf");
         var destination = Directory.CreateDirectory(Path.Combine(root, "output")).FullName;
-        var target = Path.Combine(destination, "A - Cover.pdf");
+        var target = Path.Combine(destination, "A_COVER.pdf");
         var service = new RenameService(Journal);
 
-        var result = Assert.Single(service.Execute([new(source, "A", "Cover")], destination: destination));
+        var result = Assert.Single(service.Execute([new(source, "A", "COVER")], destination: destination));
         Assert.Equal(MoveStatus.Copied, result.Status);
         Assert.Equal("%PDF-original", File.ReadAllText(source));
         Assert.Equal(File.ReadAllBytes(source), File.ReadAllBytes(target));
 
-        Assert.Equal(MoveStatus.CopyRemoved, Assert.Single(new RenameService(Journal).Undo()).Status);
+        Assert.Equal(MoveStatus.CopyRemoved, Assert.Single(service.Undo()).Status);
         Assert.True(File.Exists(source));
         Assert.False(File.Exists(target));
     }
@@ -71,7 +112,7 @@ public sealed class RenameTests : IDisposable
         var source = Source("a.pdf");
         var destination = Directory.CreateDirectory(Path.Combine(root, "output")).FullName;
         var service = new RenameService(Journal);
-        var target = Assert.Single(service.Execute([new(source, "A", "Cover")], destination: destination)).Target!;
+        var target = Assert.Single(service.Execute([new(source, "A", "COVER")], destination: destination)).Target!;
         File.WriteAllText(source, "changed");
 
         Assert.Equal(MoveStatus.Skipped, Assert.Single(service.Undo()).Status);
@@ -90,8 +131,8 @@ public sealed class RenameTests : IDisposable
     {
         var source = Source("a.pdf");
         var destination = Directory.CreateDirectory(Path.Combine(root, "output")).FullName;
-        var target = Path.Combine(destination, "A - Cover.pdf");
-        var requests = new RenameRequest[] { new(source, "A", "Cover") };
+        var target = Path.Combine(destination, "A_COVER.pdf");
+        var requests = new RenameRequest[] { new(source, "A", "COVER") };
         var service = new RenameService(Journal);
 
         Assert.Equal(target, Assert.Single(RenameService.Preview(requests, destination)).Target);
@@ -99,7 +140,7 @@ public sealed class RenameTests : IDisposable
         Assert.False(File.Exists(source));
         Assert.Equal("%PDF-original", File.ReadAllText(target));
 
-        var restored = Assert.Single(new RenameService(Journal).Undo());
+        var restored = Assert.Single(service.Undo());
         Assert.Equal(MoveStatus.Undone, restored.Status);
         Assert.Equal("%PDF-original", File.ReadAllText(source));
         Assert.False(File.Exists(target));
@@ -113,7 +154,7 @@ public sealed class RenameTests : IDisposable
         var second = Source(Path.Combine(secondFolder, "b.pdf"));
         var destination = Directory.CreateDirectory(Path.Combine(root, "output")).FullName;
         var service = new RenameService(Journal);
-        var requests = new RenameRequest[] { new(first, "A", "Cover"), new(second, "a", "COVER") };
+        var requests = new RenameRequest[] { new(first, "A", "COVER"), new(second, "A", "COVER") };
 
         var duplicates = service.Execute(requests, destination: destination);
         Assert.All(duplicates, result =>
@@ -121,7 +162,7 @@ public sealed class RenameTests : IDisposable
             Assert.Equal(MoveStatus.Skipped, result.Status);
             Assert.Contains("Повторяющееся", result.Message);
         });
-        var existing = Source(Path.Combine(destination, "A - Cover.pdf"), "existing");
+        var existing = Source(Path.Combine(destination, "A_COVER.pdf"), "existing");
         Assert.Equal(MoveStatus.Skipped, Assert.Single(service.Execute([requests[0]], destination: destination)).Status);
         Assert.Equal("existing", File.ReadAllText(existing));
         Assert.True(File.Exists(first));
@@ -133,7 +174,7 @@ public sealed class RenameTests : IDisposable
     {
         var source = Source("a.pdf");
         var destination = Directory.CreateDirectory(Path.Combine(root, "output")).FullName;
-        var requests = new RenameRequest[] { new(source, "A", "Cover") };
+        var requests = new RenameRequest[] { new(source, "A", "COVER") };
         Assert.Equal(MoveStatus.Pending, Assert.Single(RenameService.Preview(requests, destination)).Status);
         Directory.Delete(destination);
 
@@ -141,7 +182,7 @@ public sealed class RenameTests : IDisposable
         Assert.Equal(MoveStatus.Skipped, result.Status);
         Assert.Contains("папка назначения недоступна", result.Message);
         Assert.Equal("%PDF-original", File.ReadAllText(source));
-        Assert.False(File.Exists(Path.Combine(root, "A - Cover.pdf")));
+        Assert.False(File.Exists(Path.Combine(root, "A_COVER.pdf")));
     }
 
     [Fact]
@@ -149,10 +190,10 @@ public sealed class RenameTests : IDisposable
     {
         var first = Source("a.pdf");
         var second = Source("b.pdf");
-        var target = Source("B - Корпус.pdf", "unrelated");
+        var target = Source("B_КОРПУС.pdf", "unrelated");
         var service = new RenameService(Journal);
         var results = service.Execute(
-            [new(first, "A", "Корпус"), new(second, "a", "КОРПУС"), new(first, "B", "Корпус")]);
+            [new(first, "A", "КОРПУС"), new(second, "A", "КОРПУС"), new(first, "B", "КОРПУС")]);
         Assert.All(results, result => Assert.Equal(MoveStatus.Skipped, result.Status));
         Assert.Equal("unrelated", File.ReadAllText(target));
         Assert.True(File.Exists(first));
@@ -160,46 +201,91 @@ public sealed class RenameTests : IDisposable
     }
 
     [Fact]
-    public void BatchIsolatesMissingSourceAndUndoRestoresExactBytesAfterRestart()
+    public void BatchIsolatesMissingSourceAndUndoRestoresExactBytes()
     {
         var path = Source("a.pdf");
         var bytes = File.ReadAllBytes(path);
         var service = new RenameService(Journal);
-        var results = service.Execute([new(Path.Combine(root, "missing.pdf"), "B", "Cover"),
-            new(path, "A", "Корпус")]);
+        var results = service.Execute([new(Path.Combine(root, "missing.pdf"), "B", "COVER"),
+            new(path, "A", "КОРПУС")]);
         Assert.Equal(MoveStatus.Failed, results[0].Status);
         Assert.Equal(MoveStatus.Moved, results[1].Status);
         Assert.False(File.Exists(path));
         Assert.Equal(bytes, File.ReadAllBytes(results[1].Target!));
-        var undo = Assert.Single(new RenameService(Journal).Undo());
+        var undo = Assert.Single(service.Undo());
         Assert.Equal(MoveStatus.Undone, undo.Status);
         Assert.Equal(bytes, File.ReadAllBytes(path));
     }
 
     [Fact]
-    public void UndoAvailabilityTracksRemainingBatchesAcrossRestarts()
+    public void UndoAvailabilityTracksRemainingBatchesInCurrentSession()
     {
         var service = new RenameService(Journal);
         Assert.False(service.HasUndoableOperations());
-        Assert.Equal(MoveStatus.Failed, Assert.Single(service.Execute([new(Path.Combine(root, "missing.pdf"), "A", "Cover")])).Status);
+        Assert.Equal(MoveStatus.Failed, Assert.Single(service.Execute([new(Path.Combine(root, "missing.pdf"), "A", "COVER")])).Status);
         Assert.False(service.HasUndoableOperations());
 
-        Assert.Equal(MoveStatus.Moved, Assert.Single(service.Execute([new(Source("move.pdf"), "B", "Cover")])).Status);
-        Assert.Equal(MoveStatus.Copied, Assert.Single(service.Execute([new(Source("copy.pdf"), "C", "Cover")], destination: root)).Status);
+        Assert.Equal(MoveStatus.Moved, Assert.Single(service.Execute([new(Source("move.pdf"), "B", "COVER")])).Status);
+        Assert.Equal(MoveStatus.Copied, Assert.Single(service.Execute([new(Source("copy.pdf"), "C", "COVER")], destination: root)).Status);
 
-        var reopened = new RenameService(Journal);
-        Assert.True(reopened.HasUndoableOperations());
-        Assert.Equal(MoveStatus.CopyRemoved, Assert.Single(reopened.Undo()).Status);
-        Assert.True(reopened.HasUndoableOperations());
-        Assert.Equal(MoveStatus.Undone, Assert.Single(reopened.Undo()).Status);
-        Assert.False(reopened.HasUndoableOperations());
+        Assert.True(service.HasUndoableOperations());
+        Assert.Equal(MoveStatus.CopyRemoved, Assert.Single(service.Undo()).Status);
+        Assert.True(service.HasUndoableOperations());
+        Assert.Equal(MoveStatus.Undone, Assert.Single(service.Undo()).Status);
+        Assert.False(service.HasUndoableOperations());
     }
 
     [Fact]
-    public void InvalidJournalDisablesUndoAvailability()
+    public void NewSessionClearsHistoryAndCanOnlyUndoItsOwnOperations()
     {
-        File.WriteAllText(Journal, "[null]");
+        var previous = new RenameService(Journal);
+        var earlier = Assert.Single(previous.Execute([new(Source("earlier.pdf"), "A", "COVER")]));
+        Assert.True(previous.HasUndoableOperations());
+
+        var current = new RenameService(Journal);
+        Assert.False(current.HasUndoableOperations());
+        Assert.Empty(JsonNode.Parse(File.ReadAllText(Journal))!.AsArray());
+        Assert.Empty(current.Undo());
+        Assert.Empty(current.History());
+        Assert.True(previous.HasUndoableOperations());
+
+        var source = Source("current.pdf");
+        Assert.Equal(MoveStatus.Moved, Assert.Single(current.Execute([new(source, "B", "COVER")])).Status);
+        Assert.True(current.HasUndoableOperations());
+        var saved = Assert.Single(JsonNode.Parse(File.ReadAllText(Journal))!.AsArray());
+        Assert.Equal(source, saved!["Result"]!["Source"]!.GetValue<string>());
+        Assert.Equal(MoveStatus.Undone, Assert.Single(current.Undo()).Status);
+        Assert.False(current.HasUndoableOperations());
+        Assert.True(File.Exists(source));
+        Assert.True(File.Exists(earlier.Target));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MissingTargetDoesNotKeepUndoAvailableOrHideEarlierBatches(bool copy)
+    {
+        var service = new RenameService(Journal);
+        var first = Source("first.pdf");
+        Assert.Equal(MoveStatus.Moved, Assert.Single(service.Execute([new(first, "A", "COVER")])).Status);
+        var latest = Assert.Single(service.Execute([new(Source("latest.pdf"), "B", "COVER")],
+            destination: copy ? root : null));
+        Assert.Equal(copy ? MoveStatus.Copied : MoveStatus.Moved, latest.Status);
+        File.Delete(latest.Target!);
+
+        Assert.True(service.HasUndoableOperations());
+        Assert.Equal(MoveStatus.Undone, Assert.Single(service.Undo()).Status);
+        Assert.True(File.Exists(first));
+        Assert.False(service.HasUndoableOperations());
+        Assert.Empty(service.Undo());
+    }
+
+    [Fact]
+    public void NewSessionClearsAnUnreadableJournal()
+    {
+        File.WriteAllText(Journal, "invalid JSON");
         Assert.False(new RenameService(Journal).HasUndoableOperations());
+        Assert.Empty(JsonNode.Parse(File.ReadAllText(Journal))!.AsArray());
     }
 
     [Fact]
@@ -207,7 +293,7 @@ public sealed class RenameTests : IDisposable
     {
         var path = Source("a.pdf");
         var service = new RenameService(Journal);
-        var moved = Assert.Single(service.Execute([new(path, "A", "Cover")]));
+        var moved = Assert.Single(service.Execute([new(path, "A", "COVER")]));
         Source("a.pdf", "replacement");
         Assert.Equal(MoveStatus.Skipped, Assert.Single(service.Undo()).Status);
         Assert.Equal("replacement", File.ReadAllText(path));
@@ -220,7 +306,7 @@ public sealed class RenameTests : IDisposable
     public void UndoRefusesModifiedDestination()
     {
         var service = new RenameService(Journal);
-        var moved = Assert.Single(service.Execute([new(Source("a.pdf"), "A", "Cover")]));
+        var moved = Assert.Single(service.Execute([new(Source("a.pdf"), "A", "COVER")]));
         File.WriteAllText(moved.Target!, "modified");
         Assert.Equal(MoveStatus.Skipped, Assert.Single(service.Undo()).Status);
         Assert.Equal("modified", File.ReadAllText(moved.Target!));

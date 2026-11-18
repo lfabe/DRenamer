@@ -78,16 +78,22 @@
                     </Grid>
                     <ListView x:Name="Documents" Grid.Row="1" ItemsSource="{x:Bind ViewModel.Rows}"
                               SelectedItem="{x:Bind ViewModel.Selected, Mode=TwoWay}" SelectionChanged="SelectionChanged"
-                              AutomationProperties.Name="Документы">
+                              KeyDown="DocumentsKeyDown" AutomationProperties.Name="Документы">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem">
                                 <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-                                <Setter Property="Padding" Value="12,0,12,0"/>
+                                <Setter Property="Padding" Value="0"/>
                             </Style>
                         </ListView.ItemContainerStyle>
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="local:DocumentRow">
-                                <Grid ColumnSpacing="8" MinHeight="44" AutomationProperties.Name="{x:Bind OriginalName, Mode=OneWay}">
+                                <Grid ColumnSpacing="8" MinHeight="44" Padding="12,0" Background="Transparent"
+                                      AutomationProperties.Name="{x:Bind OriginalName, Mode=OneWay}">
+                                    <Grid.ContextFlyout>
+                                        <MenuFlyout>
+                                            <MenuFlyoutItem Text="Удалить из списка" Tag="{x:Bind}" Click="RemoveDocumentFromMenu"/>
+                                        </MenuFlyout>
+                                    </Grid.ContextFlyout>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="28"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="1*"/>
                                         <ColumnDefinition Width="1*"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="92"/>
@@ -103,7 +109,9 @@
                                     <TextBlock Grid.Column="4" Text="{x:Bind NewName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind NewName, Mode=OneWay}"/>
                                     <TextBlock Grid.Column="5" Text="{x:Bind Status, Mode=OneWay}" TextWrapping="Wrap"
-                                               VerticalAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}"/>
+                                               VerticalAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}"
+                                               ToolTipService.ToolTip="{x:Bind Diagnostic, Mode=OneWay}"
+                                               AutomationProperties.HelpText="{x:Bind Diagnostic, Mode=OneWay}"/>
                                 </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>
@@ -192,12 +200,7 @@
                             <TextBox Header="Обозначение" Text="{Binding Designation, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
                             <TextBox Grid.Column="1" Header="Наименование" Text="{Binding DocumentName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
                         </Grid>
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                            <TextBlock Text="{Binding Diagnostic}" TextWrapping="Wrap" VerticalAlignment="Center"
-                                       Style="{StaticResource CaptionTextBlockStyle}" AutomationProperties.LiveSetting="Polite"/>
-                            <Button Grid.Column="1" Content="Подтвердить значения" Click="ConfirmValues"/>
-                        </Grid>
+                        <Button HorizontalAlignment="Right" Content="Подтвердить значения" Click="ConfirmValues"/>
                     </StackPanel>
                 </Grid>
             </Border>

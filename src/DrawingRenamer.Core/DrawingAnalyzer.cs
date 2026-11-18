@@ -240,7 +240,7 @@ public sealed class DrawingAnalyzer
     {
         var normalized = NormalizeName(value).Replace('‐', '-').Replace('–', '-').Replace('—', '-');
         normalized = Regex.Replace(normalized, @"\s*([.\-])\s*", "$1");
-        return ocr ? Regex.Replace(normalized, @"(?<=\.)([OОoо0-9]+)(?=\.|-|\s|$)",
+        return ocr ? Regex.Replace(normalized, @"(?<=\.)([OОoо0-9]+)(?=\.|-|\u2012|\s|$)",
             m => m.Value.Replace('O', '0').Replace('О', '0').Replace('o', '0').Replace('о', '0')) : normalized;
     }
 
@@ -255,7 +255,7 @@ public sealed class DrawingAnalyzer
 
     private static bool LooksLikeGuessedPair(Candidate candidate) =>
         Regex.IsMatch(candidate.Designation,
-            @"^(?=.{3,80}$)(?=.*\d)[\p{L}\d]+(?:[.\-][\p{L}\d]+)+(?:\s[\p{L}\d]{1,6})?$") &&
+            @"^(?=.{3,80}$)(?=.*\d)[\p{L}\d]+(?:[.\u2012\-][\p{L}\d]+)+(?:\s[\p{L}\d]{1,6})?$") &&
         candidate.Name.Length is >= 2 and <= 160 && candidate.Name.Any(char.IsLetter) &&
         !candidate.Name.Contains('\uFFFD') && !candidate.Name.Any(char.IsControl) &&
         !Regex.IsMatch(candidate.Name, @"^(см\.?\s*лист|лист|наименование)\b", RegexOptions.IgnoreCase) &&
@@ -314,7 +314,7 @@ public sealed class DrawingAnalyzer
                 }
             }
 
-            return russianEnabled ? (PreferCyrillic(best.Text), best.Confidence) : best;
+            return russianEnabled ? (PreferCyrillic(best.Text).Replace('(', 'С'), best.Confidence) : best;
 
             (string Text, double Confidence) Recognize(double shear)
             {

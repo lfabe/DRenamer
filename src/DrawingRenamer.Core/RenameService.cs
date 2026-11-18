@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -16,6 +18,8 @@ public sealed record MoveResult(string Source, string? Target, MoveStatus Status
 
 public sealed class RenameService(string journalPath)
 {
+    // Keep the open session independent when another instance replaces the journal file.
+    private Entry[]? sessionHistory;
     private sealed record RotationRevision(string TargetHash, long OriginalLength, bool KeepSource);
     private sealed record Entry(Guid Batch, DateTimeOffset Time, MoveResult Result, string? Hash, RotationRevision? Rotation = null);
 
@@ -23,14 +27,14 @@ public sealed class RenameService(string journalPath)
 
     public static string? FileName(string designation, string name, out string? error)
     {
-        var fieldErrors = new[] { FieldError(designation, "Обозначение"), FieldError(name, "Наименование") };
+        var fieldErrors = new[] { FieldError(designation, "Обозначение"), FieldError(name, "Наименование", allowLowercase: true) };
         if (fieldErrors.Any(message => message is not null))
         {
             error = string.Join(" ", fieldErrors.Where(message => message is not null));
             return null;
         }
 
-        var fileName = $"{DrawingAnalyzer.NormalizeName(designation)} - {DrawingAnalyzer.NormalizeName(name)}.pdf";
+        var fileName = $"{DrawingAnalyzer.NormalizeName(designation)}_{DrawingAnalyzer.NormalizeName(name)}.pdf";
         error = fileName switch
         {
             { Length: > 255 } => "Сократите обозначение или наименование. Имя файла с расширением должно содержать не более 255 символов.",
@@ -41,13 +45,22 @@ public sealed class RenameService(string journalPath)
         return error is null ? fileName : null;
     }
 
-    private static string? FieldError(string value, string field)
+    private static string? FieldError(string value, string field, bool allowLowercase = false)
     {
         if (string.IsNullOrWhiteSpace(value)) return $"Заполните графу «{field}».";
-        var forbidden = value.Where(c => "<>:\"/\\|?*".Contains(c)).Distinct().Select(c => $"«{c}»").ToArray();
-        if (forbidden.Length > 0)
-            return $"Удалите из графы «{field}» запрещённые в именах файлов Windows символы {string.Join(", ", forbidden)}.";
-        return value.Any(c => c < ' ') ? $"Удалите управляющие символы из графы «{field}»." : null;
+        var forbidden = value.EnumerateRunes()
+            .Select(symbol => symbol.Value switch
+            {
+                >= 'A' and <= 'Z' or >= 'А' and <= 'Я' or 'Ё' or >= '0' and <= '9' or '.' or ' ' or '‒' => null,
+                >= 'a' and <= 'z' or >= 'а' and <= 'я' or 'ё' => allowLowercase ? null : "строчные буквы",
+                _ when Rune.IsWhiteSpace(symbol) || Rune.GetUnicodeCategory(symbol) is UnicodeCategory.Control or UnicodeCategory.Format
+                    => $"U+{symbol.Value:X4}",
+                _ => $"«{symbol}» (U+{symbol.Value:X4})"
+            })
+            .OfType<string>()
+            .Distinct()
+            .ToArray();
+        return forbidden.Length == 0 ? null : $"Недопустимые символы в графе «{field}» — {string.Join(", ", forbidden)}.";
     }
 
     public static IReadOnlyList<MoveResult> Preview(IReadOnlyList<RenameRequest> requests, string? destination = null)
@@ -145,14 +158,12 @@ public sealed class RenameService(string journalPath)
 
     public bool HasUndoableOperations()
     {
-        if (!File.Exists(journalPath)) return false;
         try
         {
             using var lease = LockJournal();
-            var history = Load();
-            return history.TrueForAll(entry => entry?.Result is not null) && history.Exists(CanUndo);
+            return Load().FindLast(CanUndo) is not null;
         }
-        catch (Exception ex) when (IsFileError(ex) || ex is JsonException or InvalidDataException)
+        catch (Exception ex) when (IsFileError(ex))
         {
             return false;
         }
@@ -215,8 +226,10 @@ public sealed class RenameService(string journalPath)
         }
     }
 
-    private static bool CanUndo(Entry entry) => entry.Result.Status is MoveStatus.Moved or MoveStatus.Copied ||
-        entry.Result.Status == MoveStatus.Pending && entry.Rotation is not null && File.Exists(entry.Result.Target);
+    private static bool CanUndo(Entry entry) =>
+        (entry.Result.Status is MoveStatus.Moved or MoveStatus.Copied ||
+            entry.Result.Status == MoveStatus.Pending && entry.Rotation is not null) &&
+        File.Exists(entry.Result.Target);
 
     private static MoveResult Copy(MoveResult plan, string hash)
     {
@@ -395,10 +408,13 @@ public sealed class RenameService(string journalPath)
         return new(journalPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
     }
 
-    private List<Entry> Load() => File.Exists(journalPath)
-        ? JsonSerializer.Deserialize<List<Entry>>(File.ReadAllBytes(journalPath)) ??
-          throw new InvalidDataException("Журнал операций повреждён.")
-        : [];
+    private List<Entry> Load()
+    {
+        if (sessionHistory is null && File.Exists(journalPath))
+            Save([]);
+        sessionHistory ??= [];
+        return [.. sessionHistory];
+    }
 
     private void Save(List<Entry> history)
     {
@@ -409,6 +425,7 @@ public sealed class RenameService(string journalPath)
             output.Flush(flushToDisk: true);
         }
         File.Move(pending, journalPath, overwrite: true);
+        sessionHistory = [.. history];
     }
 
     private static string Hash(string path)

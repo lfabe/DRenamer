@@ -21,7 +21,7 @@ public sealed class RecognitionTests : IDisposable
         Assert.Equal(RecognitionStatus.Ready, result.Status);
         var candidate = Assert.Single(result.Candidates);
         Assert.Equal("ABCD.123456.001", candidate.Designation);
-        Assert.Equal("Main Housing", candidate.Name);
+        Assert.Equal("MAIN HOUSING", candidate.Name);
         var manual = new DrawingAnalyzer().ReadRegions(path, 1, candidate.Regions, candidate.Turn,
             new(OcrEnabled: false), default);
         Assert.Equal(candidate.Name, manual.Name);
@@ -51,12 +51,13 @@ public sealed class RecognitionTests : IDisposable
         var original = File.ReadAllBytes(source);
         var destination = chooseFolder ? Directory.CreateDirectory(Path.Combine(folder, "output")).FullName : null;
         var journal = Path.Combine(folder, "history.json");
-        var request = new RenameRequest(source, "A", "Cover")
+        var request = new RenameRequest(source, "A", "COVER")
         {
             PageRotations = new Dictionary<int, int> { [1] = 3, [2] = 1 }
         };
 
-        var result = Assert.Single(new RenameService(journal).Execute([request], destination: destination,
+        var service = new RenameService(journal);
+        var result = Assert.Single(service.Execute([request], destination: destination,
             removeOriginals: !copy));
         Assert.True(result.Status == (copy ? MoveStatus.Copied : MoveStatus.Moved), result.Message);
         Assert.Equal(copy, File.Exists(source));
@@ -64,16 +65,16 @@ public sealed class RecognitionTests : IDisposable
         using (var saved = UglyToad.PdfPig.PdfDocument.Open(result.Target!))
         {
             Assert.Equal(new[] { 0, 270, 270 }, saved.GetPages().Select(page => page.Rotation.Value));
-            Assert.Contains("Main", saved.GetPage(1).Text);
+            Assert.Contains("MAIN", saved.GetPage(1).Text);
         }
 
         var rotated = File.ReadAllBytes(result.Target!);
         File.AppendAllText(result.Target!, "\n% Edited after saving");
-        Assert.Equal(MoveStatus.Skipped, Assert.Single(new RenameService(journal).Undo()).Status);
+        Assert.Equal(MoveStatus.Skipped, Assert.Single(service.Undo()).Status);
         Assert.Equal(copy, File.Exists(source));
         File.WriteAllBytes(result.Target!, rotated);
 
-        var undo = Assert.Single(new RenameService(journal).Undo());
+        var undo = Assert.Single(service.Undo());
         Assert.True(undo.Status == (copy ? MoveStatus.CopyRemoved : MoveStatus.Undone), undo.Message);
         if (!copy) Assert.Equal(1, undo.PageRotations![1]);
         Assert.Equal(original, File.ReadAllBytes(source));
@@ -85,7 +86,7 @@ public sealed class RecognitionTests : IDisposable
     {
         var source = Pdf(Sheet(595, 842, 0));
         var original = File.ReadAllBytes(source);
-        var request = new RenameRequest(source, "A", "Cover")
+        var request = new RenameRequest(source, "A", "COVER")
         {
             PageRotations = new Dictionary<int, int> { [1] = 1, [2] = 2 }
         };
@@ -154,6 +155,25 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Theory]
+    [InlineData("rus", "С1")]
+    [InlineData("rus+eng", "С1")]
+    [InlineData("eng", "C1")]
+    public void CorrectsAnOcrOpeningParenthesisWhenRussianIsEnabled(string languages, string expected)
+    {
+        var path = Pdf(new Page(240, 122, 0, """
+            3 w 1 J 1 j
+            105 80 m 90 71 90 53 105 44 c S
+            122 71 m 131 79 l 131 45 l S
+            """));
+        var candidate = new DrawingAnalyzer().ReadRegions(path, 1, new(Area.Full, Area.Full), 0,
+            new(Languages: languages), default);
+
+        Assert.Equal("OCR", candidate.Method);
+        Assert.Equal(expected, candidate.Designation);
+        Assert.Equal(expected, candidate.Name);
+    }
+
+    [Theory]
     [InlineData("eng")]
     [InlineData("rus+eng")]
     public void OutlineTextFallsBackToEnglishOcr(string languages)
@@ -170,14 +190,15 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Theory]
-    [InlineData("AB.COVER", "Housing")]
+    [InlineData("AB.COVER", "HOUSING")]
     [InlineData("A", "A")]
     [InlineData("123", "7")]
-    [InlineData("#_+ [A]", "Name")]
-    public void WindowsCompatibleFieldsAreReadyWhenTitleBlockIsLocated(string designation, string name)
+    [InlineData("AB.001 SB", "MAIN HOUSING")]
+    [InlineData("ABCD.123456.001", "Housing")]
+    public void ValidDrawingFieldsAreReadyWhenTitleBlockIsLocated(string designation, string name)
     {
         var sheet = Sheet(595, 842, 0, designation);
-        var path = Pdf(sheet with { Content = sheet.Content.Replace("(Main) Tj 0 -14 Td (Housing) Tj", $"({name}) Tj") });
+        var path = Pdf(sheet with { Content = sheet.Content.Replace("(MAIN) Tj 0 -14 Td (HOUSING) Tj", $"({name}) Tj") });
         var analyzer = new DrawingAnalyzer();
         var result = analyzer.Analyze(path, new(), default);
 
@@ -193,13 +214,16 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Theory]
-    [InlineData("Test\"\"\"designation", "Housing?")]
-    [InlineData("NUL.parts", "Housing")]
-    [InlineData("ABCD.123456.001", "Housing?")]
-    public void InvalidWindowsNamesStayVisibleForCorrection(string designation, string name)
+    [InlineData("TEST\"\"\"DESIGNATION", "HOUSING")]
+    [InlineData("NUL.PARTS", "HOUSING")]
+    [InlineData("ABCD.123456.001", "HOUSING?")]
+    [InlineData("#_+ [A]", "HOUSING")]
+    [InlineData("AB(1)", "HOUSING")]
+    [InlineData("AbCD.123456.001", "Housing")]
+    public void InvalidDrawingFieldsStayVisibleForCorrection(string designation, string name)
     {
         var sheet = Sheet(595, 842, 0, designation);
-        var path = Pdf(sheet with { Content = sheet.Content.Replace("(Main) Tj 0 -14 Td (Housing) Tj", $"({name}) Tj") });
+        var path = Pdf(sheet with { Content = sheet.Content.Replace("(MAIN) Tj 0 -14 Td (HOUSING) Tj", $"({name}) Tj") });
         var result = new DrawingAnalyzer().Analyze(path, new(), default);
 
         Assert.Equal(RecognitionStatus.Review, result.Status);
@@ -228,11 +252,11 @@ public sealed class RecognitionTests : IDisposable
             437 56 m 580 56 l S
             437 14 m 437 84 l S
             BT /F1 12 Tf 250 99 Td (ABCD.123456.001) Tj ET
-            BT /F1 12 Tf 250 38 Td (Parts list) Tj ET
+            BT /F1 12 Tf 250 38 Td (PARTS LIST) Tj ET
             """));
         var result = new DrawingAnalyzer().Analyze(path, new(false, Templates: [TitleTemplate.Defaults[1]]), default);
         Assert.Equal(RecognitionStatus.Ready, result.Status);
-        Assert.Equal("Parts list", Assert.Single(result.Candidates).Name);
+        Assert.Equal("PARTS LIST", Assert.Single(result.Candidates).Name);
     }
 
     [Theory]
@@ -253,7 +277,7 @@ public sealed class RecognitionTests : IDisposable
             522 56 m 580 56 l S
             """ + "\n" + (filled ? """
             BT /F1 12 Tf 250 99 Td (ABCD.123456.001) Tj ET
-            BT /F1 12 Tf 250 38 Td (Parts list) Tj ET
+            BT /F1 12 Tf 250 38 Td (PARTS LIST) Tj ET
             """ : "")));
 
         var result = new DrawingAnalyzer().Analyze(path, new(OcrEnabled: false), default);
@@ -262,7 +286,7 @@ public sealed class RecognitionTests : IDisposable
             Assert.Equal(RecognitionStatus.Ready, result.Status);
             var candidate = Assert.Single(result.Candidates);
             Assert.Equal("ABCD.123456.001", candidate.Designation);
-            Assert.Equal("Parts list", candidate.Name);
+            Assert.Equal("PARTS LIST", candidate.Name);
         }
         else
         {
@@ -291,7 +315,7 @@ public sealed class RecognitionTests : IDisposable
         var candidate = Assert.Single(result.Candidates);
         Assert.Equal(1, candidate.Page);
         Assert.Equal("ABCD.123456.001", candidate.Designation);
-        Assert.Equal("Main Housing", candidate.Name);
+        Assert.Equal("MAIN HOUSING", candidate.Name);
     }
 
     [Theory]
@@ -332,7 +356,7 @@ public sealed class RecognitionTests : IDisposable
 
         Assert.Equal(RecognitionStatus.Ready, result.Status);
         var candidate = Assert.Single(result.Candidates);
-        Assert.Equal("Main Housing", candidate.Name);
+        Assert.Equal("MAIN HOUSING", candidate.Name);
     }
 
     [Theory]
@@ -357,14 +381,14 @@ public sealed class RecognitionTests : IDisposable
             BT /F1 12 Tf 222 100 Td (Complex) Tj ET
             BT /F1 12 Tf 222 55 Td (Building) Tj ET
             BT /F1 12 Tf 400 18 Td (Design office) Tj ET
-            """ + "\n" + (filled ? "BT /F1 12 Tf 222 18 Td (Floor plan) Tj ET\nQ" : "Q")));
+            """ + "\n" + (filled ? "BT /F1 12 Tf 222 18 Td (FLOOR PLAN) Tj ET\nQ" : "Q")));
 
         var result = new DrawingAnalyzer().Analyze(path, new(), default);
 
         Assert.Equal(filled ? RecognitionStatus.Ready : RecognitionStatus.Review, result.Status);
         var candidate = Assert.Single(result.Candidates);
         Assert.Equal("ABCD.123456.001", candidate.Designation);
-        Assert.Equal(filled ? "Floor plan" : "", candidate.Name);
+        Assert.Equal(filled ? "FLOOR PLAN" : "", candidate.Name);
     }
 
     [Fact]
@@ -382,7 +406,7 @@ public sealed class RecognitionTests : IDisposable
         var sheet = Sheet(842, 595, 0);
         var path = Pdf(sheet with { Content = "q .78 0 0 .78 180 0 cm\n" + sheet.Content + "\nQ" });
         var result = new DrawingAnalyzer().Analyze(path, new(false, Templates: [template]), default);
-        Assert.Equal("Main Housing", Assert.Single(result.Candidates).Name);
+        Assert.Equal("MAIN HOUSING", Assert.Single(result.Candidates).Name);
     }
 
     [Fact]
@@ -408,7 +432,7 @@ public sealed class RecognitionTests : IDisposable
         Assert.Equal(RecognitionStatus.Ready, result.Status);
         var candidate = Assert.Single(result.Candidates);
         Assert.Equal("ABCD.123456.002", candidate.Designation);
-        Assert.Equal("Main Housing", candidate.Name);
+        Assert.Equal("MAIN HOUSING", candidate.Name);
     }
 
     [Fact]
@@ -483,7 +507,7 @@ public sealed class RecognitionTests : IDisposable
         Assert.InRange(template.WidthMm, 184, 186);
         Assert.InRange(template.HeightMm, 54, 56);
         var result = analyzer.Analyze(path, options with { Templates = [.. TitleTemplate.Defaults, template] }, default);
-        Assert.Equal("Main", Assert.Single(result.Candidates).Name);
+        Assert.Equal("MAIN", Assert.Single(result.Candidates).Name);
     }
 
     [Fact]
@@ -498,6 +522,8 @@ public sealed class RecognitionTests : IDisposable
     [InlineData(" АБВГ . 123456 . 001   СБ ", false, "АБВГ.123456.001 СБ")]
     [InlineData("ABC.O0123.O01", true, "ABC.00123.001")]
     [InlineData("ABC.O0123.O01", false, "ABC.O0123.O01")]
+    [InlineData("AB.O1‒02", true, "AB.01‒02")]
+    [InlineData("AB.O1‒02", false, "AB.O1‒02")]
     public void DesignationNormalizationKeepsSourceCharactersUnlessOcr(string source, bool ocr, string expected) =>
         Assert.Equal(expected, DrawingAnalyzer.NormalizeDesignation(source, ocr));
 
@@ -549,7 +575,7 @@ public sealed class RecognitionTests : IDisposable
             184 43 m 382 43 l S
             382 0 m 382 114 l S
             BT /F1 14 Tf 200 129 Td ({designation}) Tj ET
-            BT /F1 13 Tf 200 96 Td (Main) Tj 0 -14 Td (Housing) Tj ET
+            BT /F1 13 Tf 200 96 Td (MAIN) Tj 0 -14 Td (HOUSING) Tj ET
             Q
             """));
     }
