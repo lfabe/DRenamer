@@ -113,6 +113,23 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public void TiltedSidewaysScanWithClippedBorderOffersAUsableName()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "scan-skewed.pdf");
+        var analyzer = new DrawingAnalyzer();
+        Assert.Empty(analyzer.Analyze(path, new(OcrEnabled: false), default).Candidates);
+        var result = analyzer.Analyze(path, new(Languages: "rus"), default);
+
+        Assert.Equal(RecognitionStatus.Review, result.Status);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.False(candidate.Verified);
+        Assert.Equal("АБВГ.123456‒02", candidate.Designation);
+        Assert.Equal("Корпус основной", candidate.Name, ignoreCase: true);
+        Assert.NotNull(RenameService.FileName(candidate.Designation, candidate.Name));
+        Assert.True(candidate.Regions.Designation.IsValid && candidate.Regions.Name.IsValid);
+    }
+
+    [Fact]
     public void ReadsAnInclinedDrawingFontInSelectedScanRegions()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "scan-italic.pdf");

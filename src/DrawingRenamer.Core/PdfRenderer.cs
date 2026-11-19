@@ -5,6 +5,43 @@ namespace DrawingRenamer;
 
 public sealed record Raster(int Width, int Height, byte[] Pixels)
 {
+    internal Raster ReadScanField(Area field, Area frame, double slope, bool filterAnnotations)
+    {
+        var box = new Area((field.X - frame.X) * Width / frame.Width, (field.Y - frame.Y) * Height / frame.Height,
+            field.Width * Width / frame.Width, field.Height * Height / frame.Height);
+        var w = Math.Max(1, (int)Math.Round(box.Width));
+        var h = Math.Max(1, (int)Math.Round(box.Height));
+        var cx = box.X + box.Width / 2 - .5;
+        var cy = box.Y + box.Height / 2 - .5;
+        var result = new Raster(w, h, new byte[4 * w * h]);
+        var ink = 0;
+        var colored = 0;
+        for (var y = 0; y < h; y++)
+        for (var x = 0; x < w; x++)
+        {
+            var u = x - (w - 1) * .5;
+            var v = y - (h - 1) * .5;
+            var ix = Math.Clamp((int)Math.Round(cx + u - slope * v), 0, Width - 1);
+            var iy = Math.Clamp((int)Math.Round(cy + v + slope * u), 0, Height - 1);
+            var pixel = Pixels.AsSpan(4 * (ix + iy * Width), 4);
+            pixel.CopyTo(result.Pixels.AsSpan(4 * (x + y * w)));
+            if (filterAnnotations && pixel[0] + pixel[1] + pixel[2] < 560)
+            {
+                ink++;
+                if (pixel[0] - pixel[2] > 20) colored++;
+            }
+        }
+        // Blue pen from a signature can cross a cell containing otherwise monochrome lettering.
+        if (colored > 0 && colored < ink * .20)
+            for (var y = 0; y < h; y++)
+            for (var x = 0; x < w / 16; x++)
+            {
+                var p = 4 * (y * w + x);
+                if (result.Pixels[p] - result.Pixels[p + 2] > 20) result.Pixels.AsSpan(p, 3).Fill(255);
+            }
+        return result;
+    }
+
     // PDFium returns BGRx. BMP also gives Leptonica an in-memory input with no temporary files.
     internal byte[] ToBmp(int turns, double horizontalShear)
     {
@@ -89,14 +126,17 @@ public sealed class PdfRenderer
 {
     private static readonly object Gate = new();
 
-    public Raster Render(string path, int number, Area crop, int maxEdge, CancellationToken token)
+    public Raster Render(string path, int number, Area crop, int maxEdge, CancellationToken token) =>
+        Render(path, number, crop, maxEdge, token, 0);
+
+    internal Raster Render(string path, int number, Area crop, int maxEdge, CancellationToken token, int turn)
     {
         if (!crop.IsValid || number < 1 || maxEdge is < 32 or > 4096)
             throw new ArgumentOutOfRangeException(nameof(crop));
         token.ThrowIfCancellationRequested();
         // Open with a managed stream so filenames use Windows Unicode path handling.
         using var input = File.OpenRead(path);
-        return WithDocument(input, document => RenderPage(document, number, crop, maxEdge, token), token);
+        return WithDocument(input, document => RenderPage(document, number, crop, maxEdge, token, turn), token);
     }
 
     internal static void SaveRotated(Stream input, Stream output, IReadOnlyDictionary<int, int> rotations)
@@ -190,7 +230,7 @@ public sealed class PdfRenderer
     }
 
     private static Raster RenderPage(IntPtr document, int number, Area crop, int maxEdge,
-        CancellationToken token)
+        CancellationToken token, int turn)
     {
         var page = Native.FPDF_LoadPage(document, number - 1);
         if (page == IntPtr.Zero) throw new InvalidDataException("Не удалось открыть страницу PDF.");
@@ -198,6 +238,7 @@ public sealed class PdfRenderer
         {
             var pageWidth = Native.FPDF_GetPageWidthF(page);
             var pageHeight = Native.FPDF_GetPageHeightF(page);
+            if ((turn & 1) != 0) (pageWidth, pageHeight) = (pageHeight, pageWidth);
             if (!float.IsFinite(pageWidth) || !float.IsFinite(pageHeight) || pageWidth <= 0 || pageHeight <= 0)
                 throw new InvalidDataException("Некорректные размеры страницы.");
             var scale = Math.Min(maxEdge / Math.Max(pageWidth * crop.Width, pageHeight * crop.Height),
@@ -211,7 +252,7 @@ public sealed class PdfRenderer
                 Native.FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xffffffff);
                 Native.FPDF_RenderPageBitmap(bitmap, page, -(int)Math.Round(crop.X * pageWidth * scale),
                     -(int)Math.Round(crop.Y * pageHeight * scale), (int)Math.Ceiling(pageWidth * scale),
-                    (int)Math.Ceiling(pageHeight * scale), 0, 0);
+                    (int)Math.Ceiling(pageHeight * scale), turn, 0);
                 token.ThrowIfCancellationRequested();
                 var stride = Native.FPDFBitmap_GetStride(bitmap);
                 var buffer = Native.FPDFBitmap_GetBuffer(bitmap);

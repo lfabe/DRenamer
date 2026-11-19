@@ -10,7 +10,7 @@
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
     <Using Include="Xunit" />
-    <PdfFixtureName Include="outline-form1.pdf;protected.pdf;scan-form1.pdf;scan-italic.pdf;scan-italic-faded.pdf;scan-rotated.pdf" />
+    <PdfFixtureName Include="outline-form1.pdf;protected.pdf;scan-form1.pdf;scan-italic.pdf;scan-italic-faded.pdf;scan-rotated.pdf;scan-skewed.pdf" />
     <PdfFixture Include="@(PdfFixtureName->'$(PdfFixtureDirectory)/%(Identity)')" />
     <None Include="@(PdfFixture)" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

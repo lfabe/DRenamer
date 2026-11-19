@@ -29,6 +29,12 @@ def scan(output):
     draw.text((738, 2010), "Корпус", font=font, fill="black")
     draw.text((738, 2084), "основной", font=font, fill="black")
     image.save(output / "scan-form1.pdf", resolution=200)
+    # A clipped bottom rule and a tilted, sideways scan with text in both cells.
+    draw.rectangle((690, 1880, 1590, 1970), fill="white")
+    draw.text((780, 1894), "АБВГ.123456-02", font=font, fill="black")
+    skewed = image.crop((0, 0, image.width, bottom - 6)).rotate(
+        1.4, Image.Resampling.BICUBIC, expand=True, fillcolor="white")
+    skewed.transpose(Image.Transpose.ROTATE_90).save(output / "scan-skewed.pdf", resolution=200)
 
 
 class PdfPen:
