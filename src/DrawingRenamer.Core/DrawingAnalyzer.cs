@@ -323,7 +323,7 @@ public sealed class DrawingAnalyzer
                 if (lines.All(l => !string.IsNullOrWhiteSpace(l.Text)) && joinedReading.Score > result.Score)
                     result = joinedReading;
             }
-            name = NormalizeName(result.Text);
+            name = NormalizeOcrName(result.Text);
             nameScore = result.Score;
             confidence = Math.Min(confidence, result.Confidence);
         }
@@ -367,6 +367,11 @@ public sealed class DrawingAnalyzer
 
     public static string NormalizeName(string value) => Regex.Replace(value.Normalize(NormalizationForm.FormC),
         @"\s+", " ").Trim();
+
+    internal static string NormalizeOcrName(string value) =>
+        Regex.Replace(NormalizeName(value), @"\bсдорочн(?:ый|ая|ое|ые)\b",
+            match => match.Value[..1] + (char.IsUpper(match.Value[1]) ? "Б" : "б") + match.Value[2..],
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static string NormalizeDesignation(string value, bool ocr = false)
     {

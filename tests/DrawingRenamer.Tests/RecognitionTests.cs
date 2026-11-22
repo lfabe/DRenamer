@@ -646,6 +646,17 @@ public sealed class RecognitionTests : IDisposable
     public void DesignationNormalizationKeepsSourceCharactersUnlessOcr(string source, bool ocr, string expected) =>
         Assert.Equal(expected, DrawingAnalyzer.NormalizeDesignation(source, ocr));
 
+    [Theory]
+    [InlineData("Соединитель Сдорочный чертеж", "Соединитель Сборочный чертеж")]
+    [InlineData("сдорочная единица", "сборочная единица")]
+    [InlineData("СДОРОЧНЫЙ ЧЕРТЁЖ", "СБОРОЧНЫЙ ЧЕРТЁЖ")]
+    [InlineData("Сварочный узел", "Сварочный узел")]
+    public void OcrNameCorrectsAssemblyWordWithoutChangingCase(string source, string expected)
+    {
+        Assert.Equal(expected, DrawingAnalyzer.NormalizeOcrName(source));
+        Assert.Equal(source, DrawingAnalyzer.NormalizeName(source));
+    }
+
     [Fact]
     public void BrokenPdfIsIsolated()
     {
