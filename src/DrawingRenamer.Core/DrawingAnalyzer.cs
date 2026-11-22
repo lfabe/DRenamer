@@ -14,6 +14,7 @@ public sealed record Candidate(string Designation, string Name, int Page, int Tu
     internal double? OcrScore { get; init; }
     internal double NameOcrScore { get; init; }
     internal TitleTemplate? Template { get; init; }
+    internal bool DesignationFromOcr { get; init; }
 }
 public sealed record RecognitionResult(RecognitionStatus Status, int PageCount, IReadOnlyList<Candidate> Candidates,
     string Diagnostic)
@@ -150,6 +151,7 @@ public sealed class DrawingAnalyzer
                             if (punctuated is not null && punctuated.Designation.Count(ch => ch == '.') >
                                 candidate.Designation.Count(ch => ch == '.'))
                                 candidate = candidate with { Designation = punctuated.Designation,
+                                    DesignationFromOcr = punctuated.DesignationFromOcr,
                                     Regions = candidate.Regions with { Designation = punctuated.Regions.Designation } };
                             var clearerName = sameStamp.Where(c => c.Template?.Title == stamp.Template.Title &&
                                 RenameService.FileName(candidate.Designation, c.Name) is not null)
@@ -194,7 +196,7 @@ public sealed class DrawingAnalyzer
         matches.RemoveAll(c => c.OcrConfidence is not null && c.Regions.TitleBlock is not null && !scanReadings.Contains(c));
         var continuationOnly = matches.Count == 0 && incomplete.Count == 0 && continuations.Count != 0;
         var candidates = matches.Count != 0 ? matches : incomplete.Count != 0 ? incomplete : continuations;
-        var pairs = candidates.GroupBy(c => (c.Designation, c.Name)).Select(g =>
+        var pairs = candidates.Select(CorrectAssemblySuffix).GroupBy(c => (c.Designation, c.Name)).Select(g =>
             g.OrderByDescending(c => c.Verified).ThenByDescending(c => c.OcrConfidence).First()).ToArray();
         var status = pairs.Length switch
         {
@@ -225,7 +227,8 @@ public sealed class DrawingAnalyzer
         using var document = PdfDocument.Open(path);
         var ocr = new PpOcrReader(options.Languages);
         var candidate = ReadText(new(document.GetPage(page)), page, regions, turn, false);
-        return HasBothFields(candidate) || !options.OcrEnabled ? candidate : ReadOcr(path, candidate, ocr, token);
+        return HasBothFields(candidate) || !options.OcrEnabled ? candidate :
+            CorrectAssemblySuffix(ReadOcr(path, candidate, ocr, token));
     }
 
     public TitleTemplate? CreateTemplate(string path, int number, FieldRegions regions, int turn,
@@ -328,6 +331,7 @@ public sealed class DrawingAnalyzer
             confidence = Math.Min(confidence, result.Confidence);
         }
         return candidate with { Designation = designation, Name = name, Method = "OCR",
+            DesignationFromOcr = candidate.DesignationFromOcr || candidate.Designation.Length == 0,
             OcrConfidence = confidence, OcrScore = designationScore + nameScore, NameOcrScore = nameScore, Verified = false };
 
         bool NeedsNameRetry((string Text, double Confidence, double Score) value) =>
@@ -372,6 +376,15 @@ public sealed class DrawingAnalyzer
         Regex.Replace(NormalizeName(value), @"\bсдорочн(?:ый|ая|ое|ые)\b",
             match => match.Value[..1] + (char.IsUpper(match.Value[1]) ? "Б" : "б") + match.Value[2..],
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    internal static Candidate CorrectAssemblySuffix(Candidate candidate)
+    {
+        if (!candidate.DesignationFromOcr || !Regex.IsMatch(candidate.Name, @"\bсборочный черт[её]ж\.?\z",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)) return candidate;
+
+        var designation = Regex.Replace(candidate.Designation, @"(?<=\d )[СC][ВBЕE]\z", "СБ");
+        return designation == candidate.Designation ? candidate : candidate with { Designation = designation };
+    }
 
     public static string NormalizeDesignation(string value, bool ocr = false)
     {

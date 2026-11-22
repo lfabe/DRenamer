@@ -657,6 +657,22 @@ public sealed class RecognitionTests : IDisposable
         Assert.Equal(source, DrawingAnalyzer.NormalizeName(source));
     }
 
+    [Theory]
+    [InlineData("СВ", "Соединитель Сборочный чертеж", true, "СБ")]
+    [InlineData("СЕ", "Установка компрессора Сборочный чертёж", true, "СБ")]
+    [InlineData("CE", "СБОРОЧНЫЙ ЧЕРТЁЖ.", true, "СБ")]
+    [InlineData("СВ", "Соединитель", true, "СВ")]
+    [InlineData("СЕ", "Для сборочного чертежа", true, "СЕ")]
+    [InlineData("СЕ", "Сборочный чертёж", false, "СЕ")]
+    [InlineData("СБ", "Сборочный чертёж", true, "СБ")]
+    public void AssemblySuffixCorrectionRequiresOcrDesignationAndAssemblyTitle(
+        string suffix, string title, bool designationFromOcr, string expected)
+    {
+        var candidate = new Candidate($"АБВГ.123456.001 {suffix}", title, 1, 0, new(Area.Full, Area.Full), "OCR")
+            { DesignationFromOcr = designationFromOcr };
+        Assert.Equal($"АБВГ.123456.001 {expected}", DrawingAnalyzer.CorrectAssemblySuffix(candidate).Designation);
+    }
+
     [Fact]
     public void BrokenPdfIsIsolated()
     {
