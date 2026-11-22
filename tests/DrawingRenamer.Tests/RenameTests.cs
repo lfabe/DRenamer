@@ -61,6 +61,54 @@ public sealed class RenameTests : IDisposable
     }
 
     [Theory]
+    [InlineData("Соединитель Сборочный чертеж", "АБВГ.001 СБ_Соединитель.pdf")]
+    [InlineData("Корпус. СБОРОЧНЫЙ\r\nЧЕРТЁЖ.", "АБВГ.001 СБ_Корпус.pdf")]
+    [InlineData("Корпус — (сборочный чертёж)", "АБВГ.001 СБ_Корпус.pdf")]
+    [InlineData("Корпус\u00A0Спецификация", "АБВГ.001 СБ_Корпус.pdf")]
+    [InlineData("Сборочный чертёж Корпус", "АБВГ.001 СБ_Корпус.pdf")]
+    [InlineData("Ведомость покупных изделий", "АБВГ.001 СБ.pdf")]
+    [InlineData("Коробка передач. Программа и методика испытаний. Стендовые испытания", "АБВГ.001 СБ_Коробка передач. Стендовые испытания.pdf")]
+    [InlineData("Коробка передач. Технические условия. Часть 2", "АБВГ.001 СБ_Коробка передач. Часть 2.pdf")]
+    [InlineData("Компрессор Руководство по эксплуатации", "АБВГ.001 СБ_Компрессор.pdf")]
+    [InlineData("Компрессор. Инструкция по монтажу, пуску, регулированию и обкатке изделия", "АБВГ.001 СБ_Компрессор.pdf")]
+    [InlineData("Насос Технические условия на ремонт", "АБВГ.001 СБ_Насос.pdf")]
+    [InlineData("Редуктор Ремонтный сборочный чертеж", "АБВГ.001 СБ_Редуктор.pdf")]
+    [InlineData("Шкаф Схема электрическая принципиальная", "АБВГ.001 СБ_Шкаф.pdf")]
+    [InlineData("Шкаф Электрическая принципиальная схема", "АБВГ.001 СБ_Шкаф.pdf")]
+    [InlineData("Блок Схема электрогидравлическая принципиальная", "АБВГ.001 СБ_Блок.pdf")]
+    [InlineData("Установка Схема гидравлическая структурная, принципиальная и соединений", "АБВГ.001 СБ_Установка.pdf")]
+    [InlineData("Шкаф Схема электрическая принципиальная цепей питания", "АБВГ.001 СБ_Шкаф цепей питания.pdf")]
+    [InlineData("Корпус монтажный", "АБВГ.001 СБ_Корпус монтажный.pdf")]
+    [InlineData("Макет пояснительной записки", "АБВГ.001 СБ_Макет пояснительной записки.pdf")]
+    [InlineData("Проверка на сборочный чертеж изделия", "АБВГ.001 СБ_Проверка на сборочный чертеж изделия.pdf")]
+    public void FileNameOmitsDocumentTypeAndRetainsOtherTitleParts(string title, string expected) =>
+        Assert.Equal(expected, RenameService.FileName("АБВГ.001 СБ", title));
+
+    [Fact]
+    public void TypeOnlyTitleStillChecksReservedNamesAndEmptyTitlesAreRejected()
+    {
+        Assert.Null(RenameService.FileName("CON", "Спецификация", out var reserved));
+        Assert.Contains("зарезервированного", reserved);
+        Assert.Null(RenameService.FileName("A", "", out var missing));
+        Assert.Contains("«Наименование»", missing);
+    }
+
+    [Fact]
+    public void PreviewRejectsTargetsThatCoincideAfterOmittingDocumentType()
+    {
+        var first = Source("first.pdf");
+        var second = Source("second.pdf");
+        var result = RenameService.Preview([new(first, "A СБ", "Корпус Сборочный чертёж"), new(second, "A СБ", "Корпус")]);
+
+        Assert.All(result, item =>
+        {
+            Assert.Equal(MoveStatus.Skipped, item.Status);
+            Assert.Equal(Path.Combine(root, "A СБ_Корпус.pdf"), item.Target);
+            Assert.Equal("Повторяющееся целевое имя.", item.Message);
+        });
+    }
+
+    [Theory]
     [InlineData("'", "U+0027")]
     [InlineData("‘", "U+2018")]
     public void ReportsTheActualForbiddenSymbolsInBothFields(string quote, string code)

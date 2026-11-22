@@ -39,14 +39,17 @@ public sealed class RenameService(string journalPath)
 
     public static string? FileName(string designation, string name, out string? error)
     {
-        var fieldErrors = new[] { FieldError(designation, "Обозначение"), FieldError(name, "Наименование", allowLowercase: true) };
+        var title = DocumentTypeName.ForFileName(name);
+        var fieldErrors = new[] { FieldError(designation, "Обозначение"),
+            title is null ? null : FieldError(title, "Наименование", allowLowercase: true) };
         if (fieldErrors.Any(message => message is not null))
         {
             error = string.Join(" ", fieldErrors.Where(message => message is not null));
             return null;
         }
 
-        var fileName = $"{DrawingAnalyzer.NormalizeName(designation)}_{DrawingAnalyzer.NormalizeName(name)}.pdf";
+        var titlePart = title is null ? "" : $"_{DrawingAnalyzer.NormalizeName(title)}";
+        var fileName = $"{DrawingAnalyzer.NormalizeName(designation)}{titlePart}.pdf";
         error = fileName switch
         {
             { Length: > 255 } => "Сократите обозначение или наименование. Имя файла с расширением должно содержать не более 255 символов.",
