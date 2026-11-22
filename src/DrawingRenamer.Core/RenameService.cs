@@ -9,6 +9,7 @@ namespace DrawingRenamer;
 public enum MoveStatus { Skipped, Failed, Pending, Moved, UndoPending, Undone, Copied, CopyRemoved }
 public sealed record RenameRequest(string Source, string Designation, string Name)
 {
+    public string Separator { get; init; } = "_";
     public string? ExpectedHash { get; init; }
     public IReadOnlyDictionary<int, int>? PageRotations { get; init; }
 }
@@ -37,8 +38,13 @@ public sealed class RenameService(string journalPath)
 
     public static string? FileName(string designation, string name) => FileName(designation, name, out _);
 
-    public static string? FileName(string designation, string name, out string? error)
+    public static string? FileName(string designation, string name, out string? error) =>
+        FileName(designation, name, "_", out error);
+
+    public static string? FileName(string designation, string name, string separator, out string? error)
     {
+        error = SeparatorError(separator);
+        if (error is not null) return null;
         var title = DocumentTypeName.ForFileName(name);
         var fieldErrors = new[] { FieldError(designation, "Обозначение"),
             title is null ? null : FieldError(title, "Наименование", allowLowercase: true) };
@@ -48,7 +54,7 @@ public sealed class RenameService(string journalPath)
             return null;
         }
 
-        var titlePart = title is null ? "" : $"_{DrawingAnalyzer.NormalizeName(title)}";
+        var titlePart = title is null ? "" : $"{separator}{DrawingAnalyzer.NormalizeName(title)}";
         var fileName = $"{DrawingAnalyzer.NormalizeName(designation)}{titlePart}.pdf";
         error = fileName switch
         {
@@ -58,6 +64,25 @@ public sealed class RenameService(string journalPath)
             _ => null
         };
         return error is null ? fileName : null;
+    }
+
+    public static string? SeparatorError(string? separator)
+    {
+        if (separator is null || separator.Length is < 1 or > 6)
+            return "Разделитель: введите от одного до трёх знаков или пробелов.";
+        var symbols = separator.EnumerateRunes().ToArray();
+        if (symbols.Length > 3 || string.Concat(symbols.Select(symbol => symbol.ToString())) != separator)
+            return "Разделитель: введите от одного до трёх корректных символов.";
+        foreach (var symbol in symbols)
+        {
+            if (symbol.Value < 32 || symbol.Value <= char.MaxValue && "<>:\"/\\|?*".Contains((char)symbol.Value))
+                return $"Разделитель содержит запрещённый Windows символ U+{symbol.Value:X4}.";
+            if (Rune.IsLetter(symbol) || Rune.IsNumber(symbol))
+                return "Разделитель не может содержать буквы или цифры.";
+            if (symbol.Value != ' ' && !Rune.IsPunctuation(symbol) && !Rune.IsSymbol(symbol))
+                return "Разделитель может содержать только видимые знаки и обычные пробелы.";
+        }
+        return null;
     }
 
     private static string? FieldError(string value, string field, bool allowLowercase = false)
@@ -85,7 +110,7 @@ public sealed class RenameService(string journalPath)
         var destinationMissing = destination is not null && !Directory.Exists(destination);
         var items = requests.Select(r =>
         {
-            var name = FileName(r.Designation, r.Name, out var error);
+            var name = FileName(r.Designation, r.Name, r.Separator, out var error);
             var source = Path.GetFullPath(r.Source);
             var target = name is null ? null : Path.Combine(destination ?? Path.GetDirectoryName(source)!, name);
             return (Source: source, Target: target, Error: error);

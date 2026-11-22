@@ -12,6 +12,7 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <Compile Include="../../src/DrawingRenamer/DocumentRow.cs" Link="DocumentRow.cs" />
     <Compile Include="../../src/DrawingRenamer/MainViewModel.cs" Link="MainViewModel.cs" />
+    <Compile Include="../../src/DrawingRenamer/AppSettings.cs" Link="AppSettings.cs" />
     <Using Include="Xunit" />
     <PdfFixtureName Include="outline-form1.pdf;protected.pdf;scan-form1.pdf;scan-gasket.pdf;scan-connector.pdf;scan-italic.pdf;scan-italic-faded.pdf;scan-rotated.pdf;scan-skewed.pdf;scan-assembly.pdf;scan-nut.pdf;scan-specification.pdf;scan-sideways.pdf" />
     <PdfFixture Include="@(PdfFixtureName->'$(PdfFixtureDirectory)/%(Identity)')" />

@@ -17,6 +17,7 @@ public sealed partial class DocumentRow : ObservableObject
     [ObservableProperty] public partial string NewName { get; set; } = "";
     [ObservableProperty] public partial string Diagnostic { get; set; } = "";
     [ObservableProperty] public partial bool Confirmed { get; set; }
+    [ObservableProperty] public partial string Separator { get; set; } = "_";
 
     public string OriginalName => Path.GetFileName(Source);
     public RecognitionResult? Result { get; private set; }
@@ -27,6 +28,7 @@ public sealed partial class DocumentRow : ObservableObject
     internal bool HasDocumentName => !string.IsNullOrWhiteSpace(NameForRename);
     public RenameRequest Request => new(Source, Designation, NameForRename)
     {
+        Separator = Separator,
         ExpectedHash = SourceHash ?? throw new InvalidOperationException("Сначала подтвердите версию PDF."),
         PageRotations = PageRotations.Count == 0 ? null : new Dictionary<int, int>(PageRotations)
     };
@@ -34,7 +36,7 @@ public sealed partial class DocumentRow : ObservableObject
     {
         get
         {
-            RenameService.FileName(Designation, NameForRename, out var error);
+            RenameService.FileName(Designation, NameForRename, Separator, out var error);
             return error;
         }
     }
@@ -145,10 +147,21 @@ public sealed partial class DocumentRow : ObservableObject
     partial void OnDesignationChanged(string value) => Edited();
     partial void OnDocumentNameChanged(string value) => Edited();
 
+    partial void OnSeparatorChanged(string value)
+    {
+        NewName = RenameService.FileName(Designation, NameForRename, value, out var error) ?? "";
+        if (Confirmed && error is not null)
+        {
+            Confirmed = false;
+            Status = "Проверить";
+        }
+        Diagnostic = error ?? (Confirmed ? "Значения проверены." : "Подтвердите введённые значения.");
+    }
+
     private void Edited()
     {
         Confirmed = false;
-        var name = RenameService.FileName(Designation, NameForRename, out var error);
+        var name = RenameService.FileName(Designation, NameForRename, Separator, out var error);
         NewName = name ?? "";
         Status = "Проверить";
         Diagnostic = error ?? "Подтвердите введённые значения.";

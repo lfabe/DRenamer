@@ -15,14 +15,24 @@
                 <Button Content="Настройки">
                     <Button.Flyout>
                         <Flyout Placement="BottomEdgeAlignedRight">
+                            <ContentControl x:Name="SettingsContainer" IsTabStop="False">
                             <StackPanel Spacing="10" MinWidth="260">
-                                <ComboBox Header="Тема" SelectedIndex="0" SelectionChanged="ThemeChanged">
+                                <ComboBox Header="Тема" SelectedIndex="{x:Bind ViewModel.ThemeIndex, Mode=TwoWay}">
                                     <ComboBoxItem Content="Системная"/><ComboBoxItem Content="Светлая"/>
                                     <ComboBoxItem Content="Тёмная"/>
                                 </ComboBox>
+                                <StackPanel DataContext="{x:Bind ViewModel}" Spacing="4" MaxWidth="340">
+                                    <TextBox x:Name="SeparatorInput" Header="Разделитель имени файла"
+                                             Text="{Binding SeparatorInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                             AutomationProperties.HelpText="От одного до трёх знаков или обычных пробелов. Буквы и цифры запрещены."/>
+                                    <TextBlock Text="От 1 до 3 знаков или пробелов. Без букв и цифр."
+                                               TextWrapping="Wrap"/>
+                                    <TextBlock Text="{Binding SeparatorError}" TextWrapping="Wrap"
+                                               AutomationProperties.LiveSetting="Polite"/>
+                                </StackPanel>
                                 <ToggleSwitch Header="Распознавание OCR" IsOn="{x:Bind ViewModel.OcrEnabled, Mode=TwoWay}"
                                               OnContent="Включено" OffContent="Выключено"/>
-                                <ComboBox Header="Языки OCR" SelectedIndex="0" SelectionChanged="LanguageChanged">
+                                <ComboBox Header="Языки OCR" SelectedIndex="{x:Bind ViewModel.LanguageIndex, Mode=TwoWay}">
                                     <ComboBoxItem Content="Русский" Tag="rus"/>
                                     <ComboBoxItem Content="Русский и английский" Tag="rus+eng"/>
                                     <ComboBoxItem Content="Английский" Tag="eng"/>
@@ -30,9 +40,14 @@
                                 <TextBlock Text="{x:Bind ViewModel.TemplateLabel, Mode=OneWay}" TextWrapping="Wrap"/>
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button Content="Добавить JSON" Click="PickTemplates"/>
-                                    <Button Content="Сбросить" Click="ResetTemplates"/>
+                                    <Button x:Name="SaveSettingsButton" Content="Сохранить" Click="SaveSettings"
+                                            Style="{StaticResource AccentButtonStyle}"/>
+                                    <Button Content="Сбросить" Click="ResetSettings"/>
                                 </StackPanel>
+                                <TextBlock Text="{x:Bind ViewModel.SettingsMessage, Mode=OneWay}" TextWrapping="Wrap"
+                                           MaxWidth="340" AutomationProperties.LiveSetting="Polite"/>
                             </StackPanel>
+                            </ContentControl>
                         </Flyout>
                     </Button.Flyout>
                 </Button>

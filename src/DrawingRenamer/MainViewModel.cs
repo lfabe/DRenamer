@@ -6,11 +6,94 @@ namespace DrawingRenamer;
 
 public sealed partial class MainViewModel : ObservableObject
 {
+    private readonly string settingsPath;
+    public MainViewModel(string? settingsPath = null) =>
+        this.settingsPath = settingsPath ?? Path.Combine(DataFolder, "settings.json");
+    [ObservableProperty] public partial int ThemeIndex { get; set; }
+    [ObservableProperty] public partial string SettingsMessage { get; set; } = "";
+    public int LanguageIndex
+    {
+        get => Languages switch { "eng" => 2, "rus+eng" => 1, _ => 0 };
+        set => Languages = value switch { 1 => "rus+eng", 2 => "eng", _ => "rus" };
+    }
+
+    public Task SaveSettingsAsync()
+    {
+        if (SeparatorError is { } error)
+        {
+            ReportSettings(error);
+            return Task.CompletedTask;
+        }
+        return WorkAsync(async () =>
+        {
+            var settings = new AppSettings(ThemeIndex, SeparatorInput, OcrEnabled, Languages, TemplatePath);
+            if (await SaveSettingsFileAsync(settings)) ReportSettings("Настройки сохранены.");
+        });
+    }
+
+    public Task ResetSettingsAsync() => WorkAsync(async () =>
+    {
+        var defaults = new AppSettings();
+        if (!await SaveSettingsFileAsync(defaults)) return;
+        ApplySettings(defaults);
+        ReportSettings("Настройки сброшены к значениям по умолчанию и сохранены.");
+    });
+
+    public Task LoadSettingsAsync() => WorkAsync(async () =>
+    {
+        AppSettings settings;
+        try { settings = await Task.Run(() => AppSettingsStore.Load(settingsPath)); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException)
+        {
+            ApplySettings(new());
+            ReportSettings("Не удалось загрузить настройки. Используются значения по умолчанию.");
+            return;
+        }
+        ApplySettings(settings);
+        try { SetTemplates(settings.TemplatePath); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or
+            System.Text.Json.JsonException or ArgumentException or NotSupportedException)
+        {
+            SetTemplates(null);
+            ReportSettings("Сохранённый файл шаблонов недоступен. Используются встроенные шаблоны.");
+            return;
+        }
+        if (File.Exists(settingsPath)) ReportSettings("Настройки загружены.");
+    });
+
+    private void ApplySettings(AppSettings settings)
+    {
+        ThemeIndex = settings.ThemeIndex;
+        SeparatorInput = settings.Separator;
+        OcrEnabled = settings.OcrEnabled;
+        Languages = settings.Languages;
+        SetTemplates(null);
+    }
+
+    private async Task<bool> SaveSettingsFileAsync(AppSettings settings)
+    {
+        try
+        {
+            await Task.Run(() => AppSettingsStore.Save(settingsPath, settings));
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            ReportSettings("Не удалось сохранить настройки. Проверьте доступ к файлу настроек.");
+            return false;
+        }
+    }
+
+    private void ReportSettings(string message) => SettingsMessage = Message = message;
+    partial void OnThemeIndexChanged(int value) => SettingsMessage = "";
+    partial void OnOcrEnabledChanged(bool value) => SettingsMessage = "";
+    partial void OnLanguagesChanged(string value) => SettingsMessage = "";
     private readonly DrawingAnalyzer analyzer = new();
     private readonly HashSet<string> folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> individualFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> excludedFiles = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? cancellation;
+    private string separator = "_";
     private static readonly string DataFolder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DrawingRenamer");
     public RenameService Renamer { get; } = new(Path.Combine(DataFolder, "history.json"));
@@ -24,8 +107,22 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] public partial double Progress { get; set; }
     [ObservableProperty] public partial string Message { get; set; } = "Добавьте PDF-файлы или папку.";
     [ObservableProperty] public partial bool OcrEnabled { get; set; } = true;
-    [ObservableProperty] public partial string Languages { get; set; } = "rus";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(LanguageIndex))]
+    public partial string Languages { get; set; } = "rus";
     [ObservableProperty] public partial string TemplateLabel { get; set; } = "Встроенные шаблоны ЕСКД";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SeparatorError))]
+    public partial string SeparatorInput { get; set; } = "_";
+    public string? SeparatorError => RenameService.SeparatorError(SeparatorInput);
+
+    partial void OnSeparatorInputChanged(string value)
+    {
+        SettingsMessage = "";
+        if (SeparatorError is not null) return;
+        separator = value;
+        foreach (var row in Rows) row.Separator = value;
+    }
     public string? TemplatePath { get; private set; }
     private RecognitionOptions Options => new(OcrEnabled, Languages);
 
@@ -38,6 +135,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
         TemplatePath = path;
         TemplateLabel = path is null ? "Встроенные шаблоны ЕСКД" : Path.GetFileName(path);
+        SettingsMessage = "";
     }
 
     public async Task<RecognitionOptions> LoadRecognitionOptionsAsync(bool useDefaultsOnError = false)
@@ -97,7 +195,7 @@ public sealed partial class MainViewModel : ObservableObject
         foreach (var path in paths)
             if (existing.Add(path))
             {
-                Rows.Add(new(path));
+                Rows.Add(new(path) { Separator = separator });
                 count++;
             }
         Selected ??= Rows.FirstOrDefault();
@@ -253,6 +351,11 @@ public sealed partial class MainViewModel : ObservableObject
     public async Task MoveAsync(IReadOnlyList<RenameRequest>? requests, IReadOnlyList<MoveResult>? skipped = null,
         string? destination = null, bool removeOriginals = false)
     {
+        if (requests is not null && SeparatorError is { } error)
+        {
+            Message = error;
+            return;
+        }
         await WorkAsync(async () =>
         {
             IReadOnlyList<MoveResult> results;

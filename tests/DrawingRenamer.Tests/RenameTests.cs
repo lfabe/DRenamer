@@ -24,6 +24,106 @@ public sealed class RenameTests : IDisposable
         Assert.Null(RenameService.FileName(designation, title));
 
     [Fact]
+    public void SeparatorDefaultsToUnderscore()
+    {
+        Assert.Equal("_", new RenameRequest("a.pdf", "A", "PART").Separator);
+        Assert.Equal("A_PART.pdf", RenameService.FileName("A", "PART"));
+    }
+
+    [Theory]
+    [InlineData("_")]
+    [InlineData(" - ")]
+    [InlineData("   ")]
+    [InlineData("...")]
+    [InlineData("‒")]
+    [InlineData("#+")]
+    [InlineData("🙂🙂🙂")]
+    public void FileNameAllowsOneToThreeSignsAndSpaces(string separator)
+    {
+        Assert.Equal($"A{separator}PART.pdf", RenameService.FileName("A", "PART", separator, out var error));
+        Assert.Null(error);
+        Assert.Equal("A.pdf", RenameService.FileName("A", "Спецификация", separator, out _));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("____")]
+    [InlineData("    ")]
+    [InlineData("a")]
+    [InlineData("А")]
+    [InlineData("中")]
+    [InlineData("1")]
+    [InlineData("١")]
+    [InlineData("Ⅳ")]
+    [InlineData("²")]
+    [InlineData("_a_")]
+    [InlineData("<")]
+    [InlineData(">")]
+    [InlineData(":")]
+    [InlineData("\"")]
+    [InlineData("/")]
+    [InlineData("\\")]
+    [InlineData("|")]
+    [InlineData("?")]
+    [InlineData("*")]
+    [InlineData("\0")]
+    [InlineData("\t")]
+    [InlineData("\n")]
+    [InlineData("\u007f")]
+    [InlineData("\u200b")]
+    [InlineData("\u00a0")]
+    [InlineData("\u0301")]
+    public void InvalidSeparatorCannotReachAFileOperation(string separator)
+    {
+        var source = Source("separator.pdf");
+        var request = new RenameRequest(source, "A", "PART") { Separator = separator };
+        Assert.Null(RenameService.FileName("A", "PART", separator, out var error));
+        Assert.Contains("Разделитель", error);
+        var preview = Assert.Single(RenameService.Preview([request]));
+        Assert.Equal(MoveStatus.Skipped, preview.Status);
+        Assert.Null(preview.Target);
+        Assert.Equal(MoveStatus.Skipped, Assert.Single(new RenameService(Journal).Execute([request])).Status);
+        Assert.True(File.Exists(source));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void CustomSeparatorIsUsedForPreviewSavingAndUndo(bool chooseFolder, bool copy)
+    {
+        var source = Source("separator.pdf");
+        var destination = chooseFolder ? Directory.CreateDirectory(Path.Combine(root, "destination")).FullName : null;
+        var request = new RenameRequest(source, "A", "PART") { Separator = " - " };
+        var target = Path.Combine(destination ?? root, "A - PART.pdf");
+        Assert.Equal(target, Assert.Single(RenameService.Preview([request], destination)).Target);
+        var service = new RenameService(Journal);
+        var saved = Assert.Single(service.Execute([request], destination: destination, removeOriginals: !copy));
+        Assert.Equal(copy ? MoveStatus.Copied : MoveStatus.Moved, saved.Status);
+        Assert.Equal(target, saved.Target);
+        Assert.True(File.Exists(target));
+        Assert.Equal(copy ? MoveStatus.CopyRemoved : MoveStatus.Undone, Assert.Single(service.Undo()).Status);
+        Assert.True(File.Exists(source));
+        Assert.False(File.Exists(target));
+    }
+
+    [Fact]
+    public void SeparatorRejectsNullAndMalformedUnicode()
+    {
+        Assert.Null(RenameService.FileName("A", "PART", null!, out var missing));
+        Assert.Contains("Разделитель", missing);
+        Assert.Null(RenameService.FileName("A", "PART", new string((char)0xD800, 1), out var malformed));
+        Assert.Contains("Разделитель", malformed);
+    }
+
+    [Fact]
+    public void SeparatorStillRespectsReservedNamesAndTheFullNameLength()
+    {
+        Assert.Null(RenameService.FileName("CON", "PART", ".", out _));
+        Assert.Null(RenameService.FileName(new string('A', 249), "7", " - ", out _));
+    }
+
+    [Fact]
     public void AllowsTheSameDrawingCharactersInBothFields() =>
         Assert.Equal("АБВГ.123456.001 СБ ‒ A_ЧЕРТЁЖ 2.1 ‒ B.pdf",
             RenameService.FileName("АБВГ.123456.001 СБ ‒ A", "ЧЕРТЁЖ 2.1 ‒ B"));

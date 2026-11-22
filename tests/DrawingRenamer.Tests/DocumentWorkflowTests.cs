@@ -14,6 +14,71 @@ public sealed class DocumentWorkflowTests : IDisposable
     }
 
     [Fact]
+    public void ChangingSeparatorUpdatesNamesAndRequestsWithoutLosingValidConfirmation()
+    {
+        var model = new MainViewModel();
+        var row = ConfirmedRow("separator.pdf");
+        model.Rows.Add(row);
+        var originalRequest = row.Request;
+        model.SeparatorInput = " - ";
+        Assert.Null(model.SeparatorError);
+        Assert.Equal("A - PART.pdf", row.NewName);
+        Assert.True(row.Confirmed);
+        Assert.Equal(" - ", row.Request.Separator);
+        Assert.Equal("_", originalRequest.Separator);
+        Assert.Equal("A - PART.pdf", Path.GetFileName(Assert.Single(RenameService.Preview([row.Request])).Target));
+    }
+
+    [Fact]
+    public async Task NewDocumentsUseTheCurrentSeparatorIncludingSpaceOnlyValues()
+    {
+        var model = new MainViewModel { SeparatorInput = "   " };
+        var file = Path.Combine(folder, "later.pdf");
+        File.WriteAllText(file, "%PDF-original");
+        await model.AddDocumentsAsync([file]);
+        var row = Assert.Single(model.Rows);
+        row.Designation = "A";
+        row.DocumentName = "PART";
+        Assert.Equal("A   PART.pdf", row.NewName);
+        Assert.True(row.Confirm(RenameService.Hash(file)));
+        Assert.Equal("   ", row.Request.Separator);
+    }
+
+    [Fact]
+    public async Task InvalidSeparatorDraftKeepsTheLastValidNamesAndBlocksSaving()
+    {
+        var model = new MainViewModel();
+        var row = ConfirmedRow("invalid-separator.pdf");
+        model.Rows.Add(row);
+        model.SeparatorInput = " - ";
+        model.SeparatorInput = "A";
+        Assert.NotNull(model.SeparatorError);
+        Assert.Equal("A - PART.pdf", row.NewName);
+        Assert.True(row.Confirmed);
+        await model.MoveAsync([row.Request]);
+        Assert.True(File.Exists(row.Source));
+        Assert.Equal(model.SeparatorError, model.Message);
+        model.SeparatorInput = "#";
+        Assert.Null(model.SeparatorError);
+        Assert.Equal("A#PART.pdf", row.NewName);
+    }
+
+    [Fact]
+    public void SeparatorThatProducesAReservedWindowsNameRequiresCorrection()
+    {
+        var row = ConfirmedRow("reserved-separator.pdf");
+        row.Designation = "CON";
+        Assert.True(row.Confirm(row.SourceHash!));
+        row.Separator = ".";
+        Assert.False(row.Confirmed);
+        Assert.Empty(row.NewName);
+        Assert.Contains("зарезервированного", row.Diagnostic);
+        row.Separator = "_";
+        Assert.Equal("CON_PART.pdf", row.NewName);
+        Assert.True(row.Confirm(row.SourceHash!));
+    }
+
+    [Fact]
     public async Task BatchAnalysisPreservesConfirmedValuesForUnchangedFiles()
     {
         var model = new MainViewModel { OcrEnabled = false };

@@ -36,6 +36,7 @@ public sealed partial class MainWindow : Window
     private bool renaming;
     private bool choosingDocuments;
     private bool refreshingCandidates;
+    private bool settingsLoaded;
     private bool CanChangeDocuments => !closing && !ViewModel.Busy && !renaming && !choosingDocuments;
     private int PreviewTurn => (int)SheetRotation.Angle / 90;
     private int RegionTurn => (PreviewTurn + Orientation.SelectedIndex) & 3;
@@ -44,6 +45,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        ApplyTheme();
         PreviewScroll.ViewChanged += (_, _) =>
         {
             var thickness = RegionStrokeThickness;
@@ -62,7 +64,14 @@ public sealed partial class MainWindow : Window
         Activated += async (_, args) =>
         {
             if (args.WindowActivationState != WindowActivationState.Deactivated)
+            {
+                if (!settingsLoaded)
+                {
+                    settingsLoaded = true;
+                    await ViewModel.LoadSettingsAsync();
+                }
                 await RefreshDocumentsAsync();
+            }
         };
         Closed += (_, _) =>
         {
@@ -75,7 +84,8 @@ public sealed partial class MainWindow : Window
 
     private async void ViewModelChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(ViewModel.Busy)) UpdateCommands();
+        if (e.PropertyName is nameof(ViewModel.Busy) or nameof(ViewModel.SeparatorError)) UpdateCommands();
+        if (e.PropertyName == nameof(ViewModel.ThemeIndex)) ApplyTheme();
         if (e.PropertyName == nameof(ViewModel.Recursive)) await RefreshDocumentsAsync();
     }
 
@@ -94,7 +104,10 @@ public sealed partial class MainWindow : Window
         AnalyzeButton.IsEnabled = available && ViewModel.Rows.Count > 0;
         ConfirmButton.IsEnabled = available && Documents.SelectedItems.Count > 0;
         CancelButton.Visibility = ViewModel.AnalyzeCommand.IsRunning ? Visibility.Visible : Visibility.Collapsed;
-        RenameButton.IsEnabled = available && ViewModel.Rows.Count > 0;
+        RenameButton.IsEnabled = available && ViewModel.Rows.Count > 0 && ViewModel.SeparatorError is null;
+        SeparatorInput.IsEnabled = available;
+        SettingsContainer.IsEnabled = available;
+        SaveSettingsButton.IsEnabled = available && ViewModel.SeparatorError is null;
         UndoButton.IsEnabled = available && ViewModel.CanUndo;
         Editor.IsHitTestVisible = available;
         Documents.IsEnabled = available;
@@ -201,23 +214,22 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void ResetTemplates(object sender, RoutedEventArgs e) => ViewModel.SetTemplates(null);
-
-    private void ThemeChanged(object sender, SelectionChangedEventArgs e)
+    private async void SaveSettings(object sender, RoutedEventArgs e)
     {
-        if (Root is null) return;
-        Root.RequestedTheme = ((ComboBox)sender).SelectedIndex switch
-        {
-            1 => ElementTheme.Light,
-            2 => ElementTheme.Dark,
-            _ => ElementTheme.Default
-        };
+        if (CanChangeDocuments) await ViewModel.SaveSettingsAsync();
     }
 
-    private void LanguageChanged(object sender, SelectionChangedEventArgs e)
+    private async void ResetSettings(object sender, RoutedEventArgs e)
     {
-        if (((ComboBox)sender).SelectedItem is ComboBoxItem { Tag: string value }) ViewModel.Languages = value;
+        if (CanChangeDocuments) await ViewModel.ResetSettingsAsync();
     }
+
+    private void ApplyTheme() => Root.RequestedTheme = ViewModel.ThemeIndex switch
+    {
+        1 => ElementTheme.Light,
+        2 => ElementTheme.Dark,
+        _ => ElementTheme.Default
+    };
 
     private async void AnalyzeDocumentFromMenu(object sender, RoutedEventArgs e)
     {
