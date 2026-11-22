@@ -90,13 +90,14 @@ def outlines(output):
     writer.write(output / "outline-form1.pdf")
 
 
-def inclined_scan(output, name):
+def inclined_scan(output, name, page_size=(155.52, 57.6), image_size=None):
     source = FOLDER / f"{name}.jpg"
     with Image.open(source) as image:
         width, height = image.size
+        color_space = "/DeviceGray" if image.mode == "L" else "/DeviceRGB"
 
     writer = PdfWriter()
-    page = writer.add_blank_page(155.52, 57.6)
+    page = writer.add_blank_page(*page_size)
     scan_image = DecodedStreamObject()
     scan_image.set_data(source.read_bytes())
     scan_image.update({
@@ -104,7 +105,7 @@ def inclined_scan(output, name):
         NameObject("/Subtype"): NameObject("/Image"),
         NameObject("/Width"): NumberObject(width),
         NameObject("/Height"): NumberObject(height),
-        NameObject("/ColorSpace"): NameObject("/DeviceGray"),
+        NameObject("/ColorSpace"): NameObject(color_space),
         NameObject("/BitsPerComponent"): NumberObject(8),
         NameObject("/Filter"): NameObject("/DCTDecode"),
     })
@@ -112,7 +113,8 @@ def inclined_scan(output, name):
         NameObject("/XObject"): DictionaryObject({NameObject("/Scan"): writer._add_object(scan_image)})
     })
     stream = DecodedStreamObject()
-    stream.set_data(b"q 155.52 0 0 57.6 0 0 cm /Scan Do Q")
+    image_width, image_height = image_size or page_size
+    stream.set_data(f"q {image_width} 0 0 {image_height} 0 0 cm /Scan Do Q".encode("ascii"))
     page[NameObject("/Contents")] = writer._add_object(stream)
     writer.write(output / f"{name}.pdf")
 
@@ -123,6 +125,11 @@ def main():
     output = parser.parse_args().output
     output.mkdir(parents=True, exist_ok=True)
     scan(output)
+    # Keep the original scale and 1 pt top margin; resampling changes OCR.
+    inclined_scan(output, "scan-gasket", (595, 842), (595, 841))
+    inclined_scan(output, "scan-connector", (595, 842), (595, 841))
+    for name in ("scan-assembly", "scan-nut", "scan-specification", "scan-sideways"):
+        inclined_scan(output, name, (595, 842), (595, 841))
     source = PdfReader(output / "scan-form1.pdf")
     writer = PdfWriter()
     writer.add_page(source.pages[0]).rotate(90)

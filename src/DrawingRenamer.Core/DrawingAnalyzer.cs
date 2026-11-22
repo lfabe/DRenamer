@@ -11,7 +11,10 @@ public enum RecognitionStatus { Ready, Review, Missing, Error }
 public sealed record RecognitionOptions(bool OcrEnabled = true, string Languages = "rus+eng",
     IReadOnlyList<TitleTemplate>? Templates = null);
 public sealed record Candidate(string Designation, string Name, int Page, int Turn, FieldRegions Regions,
-    string Method, double? OcrConfidence = null, bool Verified = false);
+    string Method, double? OcrConfidence = null, bool Verified = false)
+{
+    internal double? OcrScore { get; init; }
+}
 public sealed record RecognitionResult(RecognitionStatus Status, int PageCount, IReadOnlyList<Candidate> Candidates,
     string Diagnostic)
 {
@@ -52,19 +55,20 @@ public sealed class DrawingAnalyzer
                     var lines = sheet.Lines(token);
                     var found = Find(lines, page.Width, page.Height, templates, token).ToList();
                     Raster? scan = null;
+                    ScanTitle[]? fittedScans = null;
                     if (found.Count == 0 && options.OcrEnabled)
                     {
                         var raster = renderer.Render(path, number, Area.Full, 2300, token);
                         var rasterLines = raster.FindLines(Area.Full, token).ToArray();
                         found.AddRange(Find(rasterLines, page.Width, page.Height, templates, token));
-                        if (found.Count == 0 && page.NumberOfImages > 0) scan = raster;
+                        if (page.NumberOfImages > 0) scan = raster;
                     }
                     if (found.FirstOrDefault(title => title.IsContinuation) is { } continuation)
                     {
                         locatedTitle = true;
                         var candidate = ReadText(sheet, number, continuation.Regions, continuation.Turn, false);
                         if (candidate.Designation.Length == 0 && options.OcrEnabled)
-                            candidate = ReadOcr(path, candidate, ocr, token);
+                            candidate = ReadOcr(path, candidate, ocr, token, out _);
                         if (candidate.Designation.Length > 0 && (candidate.OcrConfidence is null or >= .35))
                             continuations.Add(candidate);
                         continue;
@@ -101,7 +105,21 @@ public sealed class DrawingAnalyzer
 
                         if (!HasBothFields(candidate) && options.OcrEnabled)
                         {
-                            var recognized = ReadOcr(path, candidate, ocr, token);
+                            var recognized = ReadOcr(path, candidate, ocr, token, out var nameScore);
+                            if (scan is not null && candidate.Name.Length == 0 && recognized.OcrConfidence < .92)
+                            {
+                                fittedScans ??= ScanTitleLocator.Find(scan, page.Width, page.Height, templates,
+                                    turn => renderer.Render(path, number, Area.Full, 2300, token, turn), token).ToArray();
+                                var fitted = fittedScans.FirstOrDefault(s => s.Turn == location.Turn &&
+                                    s.Regions.TitleBlock is { } block && TitleLocator.SameFrame(block, location.PageFrame));
+                                if (fitted is not null)
+                                {
+                                    var retry = ReadOcr(path, recognized with { Name = "",
+                                        Regions = fitted.Regions with { Designation = recognized.Regions.Designation } }, ocr, token, out var retryScore, fitted);
+                                    if (retryScore > nameScore && RenameService.FileName("А", retry.Name) is not null)
+                                        recognized = retry;
+                                }
+                            }
                             if (recognized.OcrConfidence >= .35)
                                 candidate = recognized;
                         }
@@ -111,17 +129,35 @@ public sealed class DrawingAnalyzer
                         else if (candidate.Designation.Length > 0 || candidate.Name.Length > 0)
                             incomplete.Add(candidate with { Verified = false });
                     }
-                    if (scan is not null && !matches.Any(c => c.Page == number))
+                    if (scan is not null)
                     {
-                        foreach (var stamp in ScanTitleLocator.Find(scan, page.Width, page.Height, templates,
-                            turn => renderer.Render(path, number, Area.Full, 2300, token, turn), token)
+                        var fittedMatches = new List<Candidate>();
+                        foreach (var stamp in (fittedScans ?? ScanTitleLocator.Find(scan, page.Width, page.Height, templates,
+                            turn => renderer.Render(path, number, Area.Full, 2300, token, turn), token))
                             .DistinctBy(s => (s.Regions, s.Turn, s.Slope)))
                         {
                             var candidate = ReadText(sheet, number, stamp.Regions, stamp.Turn, false);
                             locatedTitle = true;
-                            if (!HasBothFields(candidate)) candidate = ReadOcr(path, candidate, ocr, token, stamp);
-                            if (candidate.OcrConfidence is not < .35 && LooksLikeGuessedPair(candidate))
-                                matches.Add(candidate);
+                            if (!HasBothFields(candidate)) candidate = ReadOcr(path, candidate, ocr, token, out _, stamp);
+                            // Preserve separators already read from this same stamp; never invent missing digits or dots.
+                            var punctuated = matches.Where(c => c.Page == number && c.Turn == candidate.Turn &&
+                                c.Regions.TitleBlock is { } previous && stamp.Regions.TitleBlock is { } fitted &&
+                                TitleLocator.SameFrame(previous, fitted) &&
+                                c.Designation.Replace(".", "") == candidate.Designation.Replace(".", "") &&
+                                RenameService.FileName(c.Designation, candidate.Name) is not null)
+                                .MaxBy(c => c.Designation.Count(ch => ch == '.'));
+                            if (punctuated is not null && punctuated.Designation.Count(ch => ch == '.') >
+                                candidate.Designation.Count(ch => ch == '.'))
+                                candidate = candidate with { Designation = punctuated.Designation,
+                                    Regions = candidate.Regions with { Designation = punctuated.Regions.Designation } };
+                            if (candidate.OcrConfidence is not < .35 &&
+                                RenameService.FileName(candidate.Designation, candidate.Name) is not null)
+                                fittedMatches.Add(candidate);
+                        }
+                        if (fittedMatches.Count > 0)
+                        {
+                            matches.RemoveAll(c => c.Page == number && c.OcrConfidence is not null);
+                            matches.AddRange(fittedMatches);
                         }
                     }
                 }
@@ -136,6 +172,16 @@ public sealed class DrawingAnalyzer
         {
             return new(RecognitionStatus.Error, pages, [], Diagnostic(ex));
         }
+        // A readable scan stamp takes precedence over OCR noise from other tables on that page.
+        var readableScanPages = matches.Where(c => c.OcrConfidence is not null &&
+            RenameService.FileName(c.Designation, c.Name) is not null).Select(c => c.Page).ToHashSet();
+        matches.RemoveAll(c => c.OcrConfidence is not null && readableScanPages.Contains(c.Page) &&
+            RenameService.FileName(c.Designation, c.Name) is null);
+        var scanReadings = matches.Where(c => c.OcrConfidence is not null && c.Regions.TitleBlock is not null)
+            .GroupBy(c => (c.Page, c.Turn, c.Regions.TitleBlock))
+            .Select(g => g.MaxBy(c => (c.OcrScore ?? c.OcrConfidence ?? 0,
+                c.Designation.Count(ch => ch == '.')))!).ToHashSet();
+        matches.RemoveAll(c => c.OcrConfidence is not null && c.Regions.TitleBlock is not null && !scanReadings.Contains(c));
         var continuationOnly = matches.Count == 0 && incomplete.Count == 0 && continuations.Count != 0;
         var candidates = matches.Count != 0 ? matches : incomplete.Count != 0 ? incomplete : continuations;
         var pairs = candidates.GroupBy(c => (c.Designation, c.Name)).Select(g =>
@@ -169,7 +215,7 @@ public sealed class DrawingAnalyzer
         using var document = PdfDocument.Open(path);
         using var ocr = new OcrReader(options);
         var candidate = ReadText(new(document.GetPage(page)), page, regions, turn, false);
-        return HasBothFields(candidate) || !options.OcrEnabled ? candidate : ReadOcr(path, candidate, ocr, token);
+        return HasBothFields(candidate) || !options.OcrEnabled ? candidate : ReadOcr(path, candidate, ocr, token, out _);
     }
 
     public TitleTemplate? CreateTemplate(string path, int number, FieldRegions regions, int turn,
@@ -228,14 +274,17 @@ public sealed class DrawingAnalyzer
         return new(designation, name, page, turn, regions, "PDF", Verified: verified);
     }
 
-    private Candidate ReadOcr(string path, Candidate candidate, OcrReader ocr, CancellationToken token, ScanTitle? scan = null)
+    private Candidate ReadOcr(string path, Candidate candidate, OcrReader ocr, CancellationToken token,
+        out double nameScore, ScanTitle? scan = null)
     {
         var designation = candidate.Designation;
         var name = candidate.Name;
+        nameScore = 0;
         // Rendering just a narrow cell can make PDFium decode a large JPEG at thumbnail resolution.
         var frame = candidate.Regions.TitleBlock.GetValueOrDefault().Rotate(candidate.Turn);
         var stamp = scan is not null ? renderer.Render(path, candidate.Page, frame, 2200, token, scan.Turn) : null;
         var confidence = 1d;
+        var designationScore = 0d;
         var englishFirst = false;
         if (designation.Length == 0)
         {
@@ -243,6 +292,7 @@ public sealed class DrawingAnalyzer
             designation = NormalizeDesignation(result.Text, ocr: true);
             if (scan is not null) designation = designation.Replace('-', '‒');
             confidence = result.Confidence;
+            designationScore = result.Score;
             englishFirst = designation.Any(c => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z') &&
                 !designation.Any(c => c is >= '\u0400' and <= '\u052f');
         }
@@ -253,33 +303,28 @@ public sealed class DrawingAnalyzer
             {
                 var direct = ocr.Read(renderer.Render(path, candidate.Page, candidate.Regions.Name.Rotate(scan.Turn).Inset(.017),
                     1450, token, scan.Turn), 0, token, englishFirst, false, false, false);
-                if (PreferName(direct, result)) result = direct;
+                if (direct.Score > result.Score) result = direct;
             }
-            if (scan?.NameLines.Count is >= 2 and <= 8 && NeedsNameRetry(result))
+            if (scan?.NameLines.Count is >= 1 and <= 8 && NeedsNameRetry(result))
             {
                 var lines = scan.NameLines.Select(line => Read(line, preferEnglish: englishFirst, singleLine: true)).ToArray();
                 var joined = string.Join(" ", lines.Select(l => l.Text.Trim()));
                 var mean = lines.Average(l => l.Confidence);
-                if (lines.All(l => !string.IsNullOrWhiteSpace(l.Text)) && PreferName((joined, mean), result))
-                    result = (joined, mean);
+                var joinedReading = (Text: joined, Confidence: mean, Score: lines.Average(l => l.Score));
+                if (lines.All(l => !string.IsNullOrWhiteSpace(l.Text)) && joinedReading.Score > result.Score)
+                    result = joinedReading;
             }
             name = NormalizeName(result.Text);
+            nameScore = result.Score;
             confidence = Math.Min(confidence, result.Confidence);
         }
         return candidate with { Designation = designation, Name = name, Method = "OCR",
-            OcrConfidence = confidence, Verified = false };
+            OcrConfidence = confidence, OcrScore = designationScore + nameScore, Verified = false };
 
-        bool NeedsNameRetry((string Text, double Confidence) value) =>
+        bool NeedsNameRetry((string Text, double Confidence, double Score) value) =>
             value.Confidence < .92 || RenameService.FileName(designation, NormalizeName(value.Text)) is null;
 
-        bool PreferName((string Text, double Confidence) next, (string Text, double Confidence) current)
-        {
-            double Score((string Text, double Confidence) value) => value.Confidence +
-                (RenameService.FileName(designation, NormalizeName(value.Text)) is not null ? .15 : 0);
-            return Score(next) > Score(current);
-        }
-
-        (string Text, double Confidence) Read(Area region, bool preferEnglish = false, bool isDesignation = false,
+        (string Text, double Confidence, double Score) Read(Area region, bool preferEnglish = false, bool isDesignation = false,
             bool singleLine = false)
         {
             if (stamp is not null && scan is not null)
@@ -289,18 +334,25 @@ public sealed class DrawingAnalyzer
                 if (singleLine && RenameService.FileName(designation, NormalizeName(result.Text)) is null)
                 {
                     var inset = ReadStamp(.022);
-                    if (PreferName(inset, result)) result = inset;
+                    if (inset.Score > result.Score) result = inset;
                 }
                 return result;
 
-                (string Text, double Confidence) ReadStamp(double inset)
+                (string Text, double Confidence, double Score) ReadStamp(double inset)
                 {
                     var raster = stamp.ReadScanField(upright.Inset(inset), frame, scan.Slope, !isDesignation);
                     return ocr.Read(raster, 0, token, preferEnglish, isDesignation, true, singleLine);
                 }
             }
-            return ocr.Read(renderer.Render(path, candidate.Page, region.Inset(.017), 1450, token),
+            var direct = ocr.Read(renderer.Render(path, candidate.Page, region.Inset(.017), 1450, token),
                 candidate.Turn, token, preferEnglish, isDesignation, false, false);
+            if (!isDesignation && direct.Text.Count(char.IsLetter) >= 3 && NeedsNameRetry(direct))
+            {
+                var inset = ocr.Read(renderer.Render(path, candidate.Page, region.Inset(.06), 900, token),
+                    candidate.Turn, token, preferEnglish, false, false, false);
+                if (inset.Score > direct.Score) direct = inset;
+            }
+            return direct;
         }
     }
 
@@ -347,7 +399,7 @@ public sealed class DrawingAnalyzer
         private Engine? engine;
         private Engine? englishFirstEngine;
 
-        public (string Text, double Confidence) Read(Raster raster, int turn, CancellationToken token,
+        public (string Text, double Confidence, double Score) Read(Raster raster, int turn, CancellationToken token,
             bool preferEnglish, bool isDesignation, bool fittedScan, bool singleLine)
         {
             token.ThrowIfCancellationRequested();
@@ -355,23 +407,17 @@ public sealed class DrawingAnalyzer
             var reader = preferEnglish && options.Languages == "rus+eng"
                 ? englishFirstEngine ??= new Engine(data, "eng+rus", EngineMode.LstmOnly)
                 : engine ??= new Engine(data, options.Languages, EngineMode.LstmOnly);
-            var readings = singleLine ? new List<(string Text, double Confidence, double Score)>() : null;
             var best = Recognize(0);
-            if (best.Confidence < (singleLine ? .96 : .85))
+            var wordName = !isDesignation && best.Text.Count(char.IsLetter) >= 3;
+            if (best.Confidence < (singleLine || wordName ? .96 : .85))
             {
                 // Drawing fonts are often inclined at about 15 degrees; scans can distort the slope.
-                foreach (var shear in new[] { .20, .27 })
+                foreach (var shear in wordName ? new[] { .15, .20, .27, .35 } : new[] { .20, .27 })
                 {
                     var corrected = Recognize(shear);
-                    if (corrected.Confidence > best.Confidence && !string.IsNullOrWhiteSpace(corrected.Text))
+                    if (corrected.Score > best.Score && !string.IsNullOrWhiteSpace(corrected.Text))
                         best = corrected;
                 }
-            }
-
-            if (readings is { Count: > 0 })
-            {
-                var line = readings.MaxBy(r => r.Score);
-                best = (line.Text, line.Confidence);
             }
 
             // A broad crop can enlarge thin strokes and scan noise. Retry a single designation line at two scales.
@@ -392,41 +438,42 @@ public sealed class DrawingAnalyzer
                 }
             }
 
-            return russianEnabled ? (PreferCyrillic(best.Text).Replace('(', 'С'), best.Confidence) : best;
+            return russianEnabled ? (PreferCyrillic(best.Text).Replace('(', 'С'), best.Confidence, best.Score) : best;
 
-            (string Text, double Confidence) Recognize(double shear)
+            (string Text, double Confidence, double Score) Recognize(double shear)
             {
                 token.ThrowIfCancellationRequested();
                 using var image = TesseractOCR.Pix.Image.LoadFromMemory(raster.ToBmp(turn, shear));
                 var mode = singleLine ? PageSegMode.SingleLine : PageSegMode.SingleBlock;
                 var result = Process(image, mode);
-                if (!fittedScan || result.Confidence >= .9 || Math.Min(image.Width, image.Height) < 40)
+                if ((!fittedScan && (isDesignation || result.Text.Count(char.IsLetter) < 3)) ||
+                    result.Confidence >= .9 || Math.Min(image.Width, image.Height) < 40)
                     return result;
                 using var gray = image.ConvertRGBToGray();
                 using var scaled = gray.Scale(.65f, .65f);
                 var smaller = Process(scaled, mode);
-                if (smaller.Confidence > result.Confidence) result = smaller;
+                if (smaller.Score > result.Score) result = smaller;
                 using var binary = gray.BinarizeSauvola(16, .25f, true);
                 var adaptive = Process(binary, mode);
-                return adaptive.Confidence > result.Confidence ? adaptive : result;
+                return adaptive.Score > result.Score ? adaptive : result;
             }
 
-            (string Text, double Confidence) Process(TesseractOCR.Pix.Image image, PageSegMode mode)
+            (string Text, double Confidence, double Score) Process(TesseractOCR.Pix.Image image, PageSegMode mode)
             {
                 using var page = reader.Process(image, mode);
                 token.ThrowIfCancellationRequested();
-                if (readings is not null && page.MeanConfidence > .35 && !string.IsNullOrWhiteSpace(page.Text))
+                var score = (double)page.MeanConfidence;
+                var text = NormalizeName(page.Text);
+                if (!isDesignation && text.Count(char.IsLetter) >= 3)
                 {
-                    var text = NormalizeName(page.Text);
                     using var layout = page.Layout;
                     var knownLetters = (from block in layout from paragraph in block.Paragraphs
                         from line in paragraph.TextLines from word in line.Words
-                        where word.IsFromDictionary select word.Text.Length).Sum();
-                    var score = page.MeanConfidence + .35 * knownLetters / text.Length;
+                        where word.IsFromDictionary && word.Text.Count(char.IsLetter) >= 3 select word.Text.Length).Sum();
+                    score += .35 * knownLetters / text.Length;
                     if (RenameService.FileName("А", text) is not null) score += .12;
-                    readings.Add((text, page.MeanConfidence, score));
                 }
-                return (page.Text, page.MeanConfidence);
+                return (page.Text, page.MeanConfidence, score);
             }
         }
 

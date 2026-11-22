@@ -21,7 +21,9 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
             var view = new ScanTitleLocator(raster, turn);
             var pixelsPerMm = view.width / ((turn & 1) == 0 ? pageWidth : pageHeight) * 72 / 25.4;
             IEnumerable<ScanTitle> Matches(ScanTitleLocator v) =>
-                layouts.SelectMany(g => v.Match(g, g.Key * pixelsPerMm, token));
+                layouts.SelectMany(g => new[] { 1d, .75, .5 }.SelectMany(scale =>
+                    v.Match(g, g.Key * pixelsPerMm * scale, token)))
+                    .DistinctBy(s => (s.Regions, s.Turn, s.Slope));
             var found = Matches(view).ToList();
             if (turn != 0 && found.Count > 0)
             {

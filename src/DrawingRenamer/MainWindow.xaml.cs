@@ -35,6 +35,7 @@ public sealed partial class MainWindow : Window
     private bool closing;
     private bool renaming;
     private bool choosingDocuments;
+    private bool refreshingCandidates;
     private bool CanChangeDocuments => !closing && !ViewModel.Busy && !renaming && !choosingDocuments;
     private int PreviewTurn => (int)SheetRotation.Angle / 90;
     private int RegionTurn => (PreviewTurn + Orientation.SelectedIndex) & 3;
@@ -217,6 +218,12 @@ public sealed partial class MainWindow : Window
         if (((ComboBox)sender).SelectedItem is ComboBoxItem { Tag: string value }) ViewModel.Languages = value;
     }
 
+    private async void AnalyzeDocumentFromMenu(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments && sender is MenuFlyoutItem { Tag: DocumentRow row })
+            await ViewModel.AnalyzeDocumentAsync(row);
+    }
+
     private void RemoveDocumentFromMenu(object sender, RoutedEventArgs e)
     {
         if (CanChangeDocuments && sender is MenuFlyoutItem { Tag: DocumentRow row })
@@ -256,15 +263,22 @@ public sealed partial class MainWindow : Window
 
     private void RefreshCandidates()
     {
-        var candidates = current?.Candidates ?? [];
-        CandidatePicker.ItemsSource = candidates.Select(candidate =>
-            $"Лист {candidate.Page} · {candidate.Designation} - {candidate.Name}").ToArray();
-        CandidatePicker.Visibility = candidates.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        refreshingCandidates = true;
+        try
+        {
+            var candidates = current?.Candidates ?? [];
+            CandidatePicker.ItemsSource = candidates.Select(candidate =>
+                $"Лист {candidate.Page} · {candidate.Designation} - {candidate.Name}").ToArray();
+            CandidatePicker.Visibility = candidates.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            CandidatePicker.SelectedIndex = current?.SelectedCandidate is { } selected
+                ? candidates.ToList().IndexOf(selected) : -1;
+        }
+        finally { refreshingCandidates = false; }
     }
 
     private async void CandidateChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (current is not { } row || CandidatePicker.SelectedIndex < 0 ||
+        if (refreshingCandidates || current is not { } row || CandidatePicker.SelectedIndex < 0 ||
             CandidatePicker.SelectedIndex >= row.Candidates.Count) return;
         var candidate = row.Candidates[CandidatePicker.SelectedIndex];
         row.Use(candidate);
@@ -530,9 +544,12 @@ public sealed partial class MainWindow : Window
 
     private async void ReadRegions(object sender, RoutedEventArgs e)
     {
-        if (current is not { } row || designation is not { } first || name is not { } second) return;
-        await ViewModel.ReadAsync(row, page, new(first, second), RegionTurn);
-        PaintRegions();
+        if (!CanChangeDocuments || current is not { } row || designation is not { } first || name is not { } second) return;
+        var number = page;
+        var selected = row.SelectedCandidate;
+        await ViewModel.ReadAsync(row, number, new(first, second), RegionTurn);
+        if (current == row && page == number && !ReferenceEquals(selected, row.SelectedCandidate))
+            await SelectPageAsync(number);
     }
 
     private async void ConfirmValues(object sender, RoutedEventArgs e)
@@ -651,7 +668,7 @@ public sealed partial class MainWindow : Window
                 row.NameError ?? "Нажмите «Подтвердить значения» после проверки обеих граф.")).ToArray();
         string? destination = null;
         string? pickerError = null;
-        var preserveRotations = false;
+        var preserveRotations = true;
         while (!closing)
         {
             var plans = await Task.Run(() => RenameService.Preview(requests, destination));

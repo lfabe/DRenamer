@@ -91,6 +91,7 @@
                                       AutomationProperties.Name="{x:Bind OriginalName, Mode=OneWay}">
                                     <Grid.ContextFlyout>
                                         <MenuFlyout>
+                                            <MenuFlyoutItem Text="Распознать" Tag="{x:Bind}" Click="AnalyzeDocumentFromMenu"/>
                                             <MenuFlyoutItem Text="Удалить из списка" Tag="{x:Bind}" Click="RemoveDocumentFromMenu"/>
                                         </MenuFlyout>
                                     </Grid.ContextFlyout>
@@ -200,6 +201,8 @@
                             <TextBox Header="Обозначение" Text="{Binding Designation, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
                             <TextBox Grid.Column="1" Header="Наименование" Text="{Binding DocumentName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
                         </Grid>
+                        <TextBlock Text="{Binding Diagnostic, Mode=OneWay}" TextWrapping="Wrap"
+                                   AutomationProperties.LiveSetting="Polite"/>
                         <Button HorizontalAlignment="Right" Content="Подтвердить значения" Click="ConfirmValues"/>
                     </StackPanel>
                 </Grid>

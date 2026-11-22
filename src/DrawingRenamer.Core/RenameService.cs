@@ -65,6 +65,7 @@ public sealed class RenameService(string journalPath)
             {
                 >= 'A' and <= 'Z' or >= 'А' and <= 'Я' or 'Ё' or >= '0' and <= '9' or '.' or ' ' or '‒' => null,
                 >= 'a' and <= 'z' or >= 'а' and <= 'я' or 'ё' => allowLowercase ? null : "строчные буквы",
+                '_' when allowLowercase => null,
                 _ when Rune.IsWhiteSpace(symbol) || Rune.GetUnicodeCategory(symbol) is UnicodeCategory.Control or UnicodeCategory.Format
                     => $"U+{symbol.Value:X4}",
                 _ => $"«{symbol}» (U+{symbol.Value:X4})"

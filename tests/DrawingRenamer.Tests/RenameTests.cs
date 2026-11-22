@@ -29,7 +29,6 @@ public sealed class RenameTests : IDisposable
             RenameService.FileName("АБВГ.123456.001 СБ ‒ A", "ЧЕРТЁЖ 2.1 ‒ B"));
 
     [Theory]
-    [InlineData("AB_01")]
     [InlineData("AB/01")]
     [InlineData("AB-01")]
     [InlineData("AB–01")]
@@ -51,6 +50,14 @@ public sealed class RenameTests : IDisposable
         Assert.Equal($"AB_{value}.pdf", RenameService.FileName("AB", value));
         Assert.Null(RenameService.FileName(value, "PART", out var designationError));
         Assert.Contains("«Обозначение» — строчные буквы", designationError);
+    }
+
+    [Fact]
+    public void AllowsUnderscoresInTheTitleOnly()
+    {
+        Assert.Equal("AB_Прокладка_01.pdf", RenameService.FileName("AB", "Прокладка_01"));
+        Assert.Null(RenameService.FileName("AB_01", "PART", out var error));
+        Assert.Contains("«Обозначение»", error);
     }
 
     [Theory]

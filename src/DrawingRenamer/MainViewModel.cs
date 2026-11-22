@@ -148,12 +148,16 @@ public sealed partial class MainViewModel : ObservableObject
     private static bool IsPdf(string path) => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase);
 
     [RelayCommand]
-    private async Task AnalyzeAsync()
+    private Task AnalyzeAsync() => AnalyzeRowsAsync(Rows.Where(r => r.Included).ToArray(), false);
+
+    public Task AnalyzeDocumentAsync(DocumentRow row) => Rows.Contains(row)
+        ? AnalyzeRowsAsync([row], true) : Task.CompletedTask;
+
+    private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force)
     {
-        if (Busy || Rows.Count == 0) return;
+        if (Busy || batch.Length == 0) return;
         using var operation = new CancellationTokenSource();
         cancellation = operation;
-        var batch = Rows.Where(r => r.Included).ToArray();
         Progress = 0;
         try
         {
@@ -167,17 +171,23 @@ public sealed partial class MainViewModel : ObservableObject
                     Message = "Не удалось загрузить выбранный JSON. Проверьте файл или сбросьте шаблоны в настройках.";
                     return;
                 }
+                var processed = 0;
                 for (var index = 0; index < batch.Length; index++)
                 {
                     operation.Token.ThrowIfCancellationRequested();
                     var row = batch[index];
+                    if (!force && row.Confirmed && row.ObserveVersion(await Task.Run(() => ReadVersion(row.Source))))
+                    {
+                        Progress = 100d * (index + 1) / batch.Length;
+                        continue;
+                    }
                     Message = $"Анализ {index + 1} из {batch.Length} · {row.OriginalName}";
                     var result = await Task.Run(() => analyzer.Analyze(row.Source, options, operation.Token));
                     row.Apply(result);
+                    processed++;
                     Progress = 100d * (index + 1) / batch.Length;
                 }
-                Message = batch.Length == 0 ? "Отметьте файлы для анализа." :
-                    $"Обработано: {batch.Length}. Готово: {batch.Count(r => r.Confirmed)}.";
+                Message = $"Распознано: {processed}. Сохранено подтверждённых: {batch.Length - processed}.";
             });
         }
         finally { cancellation = null; }

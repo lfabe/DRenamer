@@ -43,6 +43,26 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Theory]
+    [InlineData(90)]
+    [InlineData(180)]
+    [InlineData(270)]
+    public void RecognizedOrientationIsSavedAndUndoRestoresTheOriginalPdf(int rotation)
+    {
+        var path = Pdf(Sheet(595, 842, rotation));
+        var original = File.ReadAllBytes(path);
+        var row = new DocumentRow(path);
+        row.Apply(new DrawingAnalyzer().Analyze(path, new(OcrEnabled: false), default));
+        Assert.True(row.Confirmed);
+        var service = new RenameService(Path.Combine(folder, "auto-rotation.json"));
+        var renamed = Assert.Single(service.Execute([row.Request]));
+        Assert.Equal(MoveStatus.Moved, renamed.Status);
+        using (var document = UglyToad.PdfPig.PdfDocument.Open(renamed.Target!))
+            Assert.Equal(0, document.GetPage(1).Rotation.Value);
+        Assert.Equal(MoveStatus.Undone, Assert.Single(service.Undo()).Status);
+        Assert.Equal(original, File.ReadAllBytes(path));
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(true, true)]
@@ -110,6 +130,87 @@ public sealed class RecognitionTests : IDisposable
         Assert.Equal("OCR", candidate.Method);
         Assert.Equal("АБВГ.123456.001", candidate.Designation);
         Assert.Equal("Корпус основной", candidate.Name, ignoreCase: true);
+    }
+
+    [Fact]
+    public void CustomScanTemplateTakesPrecedenceOverBuiltInFields()
+    {
+        var custom = TitleTemplate.Defaults[0] with { Name = "Top line", Title = new(65d / 185, 15d / 55, 70d / 185, 12d / 55) };
+        var result = new DrawingAnalyzer().Analyze(Path.Combine(AppContext.BaseDirectory, "scan-form1.pdf"),
+            new(Languages: "rus", Templates: [.. TitleTemplate.Defaults, custom]), default);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal("Корпус", candidate.Name, ignoreCase: true);
+        Assert.False(candidate.Verified);
+    }
+
+    [Fact]
+    public void ReadsDesignationSeparatorsWithoutFrameStrokes()
+    {
+        var result = new DrawingAnalyzer().Analyze(Path.Combine(AppContext.BaseDirectory, "scan-nut.pdf"),
+            new(Languages: "rus"), default);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal("КК ВМ 01.02.03.01.002", candidate.Designation);
+        Assert.Equal("Гайка", candidate.Name);
+    }
+
+    [Theory]
+    [InlineData("scan-assembly.pdf", "Соединитель", 0)]
+    [InlineData("scan-specification.pdf", "Соединитель", 0)]
+    [InlineData("scan-sideways.pdf", "компрессора", 3)]
+    public void ReadsTheBottomStampAndItsOrientation(string file, string name, int turn)
+    {
+        var result = new DrawingAnalyzer().Analyze(Path.Combine(AppContext.BaseDirectory, file),
+            new(Languages: "rus"), default);
+        Assert.Equal(RecognitionStatus.Review, result.Status);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Contains(name, candidate.Name);
+        Assert.Equal(turn, candidate.Turn);
+        Assert.NotNull(RenameService.FileName(candidate.Designation, candidate.Name));
+    }
+
+    [Fact]
+    public void ReadsSingleStoreyALettersInAnInclinedScanTitle()
+    {
+        var result = new DrawingAnalyzer().Analyze(Path.Combine(AppContext.BaseDirectory, "scan-gasket.pdf"),
+            new(Languages: "rus"), default);
+
+        Assert.Equal(RecognitionStatus.Review, result.Status);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Contains("Прокладка", candidate.Name);
+        Assert.Equal("КК ВМ 01.02.03.01.001", candidate.Designation);
+        Assert.NotNull(RenameService.FileName(candidate.Designation, candidate.Name));
+        Assert.Equal("OCR", candidate.Method);
+        Assert.False(candidate.Verified);
+    }
+
+    [Theory]
+    [InlineData("rus")]
+    [InlineData("rus+eng")]
+    public void FindsAndReadsAnInclinedConnectorScanAutomatically(string languages)
+    {
+        var result = new DrawingAnalyzer().Analyze(Path.Combine(AppContext.BaseDirectory, "scan-connector.pdf"),
+            new(Languages: languages), default);
+
+        Assert.Equal(RecognitionStatus.Review, result.Status);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal("Соединитель", candidate.Name);
+        Assert.Equal(0, candidate.Turn);
+        Assert.True(candidate.Regions.Designation.IsValid && candidate.Regions.Name.IsValid);
+        Assert.False(candidate.Verified);
+    }
+
+    [Theory]
+    [InlineData("rus")]
+    [InlineData("rus+eng")]
+    public void ReadsManuallySelectedFieldsInAnInclinedConnectorScan(string languages)
+    {
+        var regions = new FieldRegions(new(.391, .840, .513, .049), new(.405, .895, .305, .073));
+        var candidate = new DrawingAnalyzer().ReadRegions(Path.Combine(AppContext.BaseDirectory, "scan-connector.pdf"),
+            1, regions, 0, new(Languages: languages), default);
+
+        Assert.Equal("Соединитель", candidate.Name);
+        Assert.Equal("OCR", candidate.Method);
+        Assert.False(candidate.Verified);
     }
 
     [Fact]

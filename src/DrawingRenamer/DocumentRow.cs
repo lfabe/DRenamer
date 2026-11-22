@@ -70,6 +70,8 @@ public sealed partial class DocumentRow : ObservableObject
         Confirmed = false;
         Status = "Проверить";
         SelectedCandidate = candidate;
+        if (candidate.Turn == 0) PageRotations.Remove(candidate.Page);
+        else PageRotations[candidate.Page] = candidate.Turn;
         Designation = candidate.Designation;
         DocumentName = candidate.Name;
         Diagnostic = NameError ?? (candidate.OcrConfidence is { } confidence
