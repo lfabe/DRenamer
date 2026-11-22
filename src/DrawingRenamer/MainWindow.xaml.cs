@@ -258,7 +258,8 @@ public sealed partial class MainWindow : Window
             await SelectPageAsync(current?.SelectedCandidate?.Page ?? 1);
         }
         if (e.PropertyName == nameof(DocumentRow.Source)) await SelectPageAsync(page);
-        if (e.PropertyName is nameof(DocumentRow.Designation) or nameof(DocumentRow.DocumentName)) UpdateRegionGuidance();
+        if (e.PropertyName is nameof(DocumentRow.Designation) or nameof(DocumentRow.DocumentName) or nameof(DocumentRow.HasDocumentName))
+            UpdateRegionGuidance();
     }
 
     private void RefreshCandidates()
@@ -267,8 +268,7 @@ public sealed partial class MainWindow : Window
         try
         {
             var candidates = current?.Candidates ?? [];
-            CandidatePicker.ItemsSource = candidates.Select(candidate =>
-                $"Лист {candidate.Page} · {candidate.Designation} - {candidate.Name}").ToArray();
+            CandidatePicker.ItemsSource = candidates.Select(DocumentRow.CandidateLabel).ToArray();
             CandidatePicker.Visibility = candidates.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             CandidatePicker.SelectedIndex = current?.SelectedCandidate is { } selected
                 ? candidates.ToList().IndexOf(selected) : -1;
@@ -431,7 +431,7 @@ public sealed partial class MainWindow : Window
             (result.Status == RecognitionStatus.Missing ||
                 result.Candidates is [{ } candidate] &&
                 (string.IsNullOrWhiteSpace(candidate.Designation) || string.IsNullOrWhiteSpace(candidate.Name))) &&
-            (string.IsNullOrWhiteSpace(row.Designation) || string.IsNullOrWhiteSpace(row.DocumentName));
+            (string.IsNullOrWhiteSpace(row.Designation) || !row.HasDocumentName);
         ManualRegionsNotice.IsOpen = RegionControls.Visibility == Visibility.Visible &&
             RegionActions.Visibility == Visibility.Collapsed && needsFields;
         ToggleRegionsButton.Visibility = ManualRegionsNotice.IsOpen ? Visibility.Collapsed : Visibility.Visible;

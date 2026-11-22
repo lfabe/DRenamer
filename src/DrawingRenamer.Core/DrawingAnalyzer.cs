@@ -11,6 +11,7 @@ public sealed record RecognitionOptions(bool OcrEnabled = true, string Languages
 public sealed record Candidate(string Designation, string Name, int Page, int Turn, FieldRegions Regions,
     string Method, double? OcrConfidence = null, bool Verified = false)
 {
+    public string? NameWithoutDocumentType => DocumentTypeName.ForFileName(Name);
     internal double? OcrScore { get; init; }
     internal double NameOcrScore { get; init; }
     internal TitleTemplate? Template { get; init; }

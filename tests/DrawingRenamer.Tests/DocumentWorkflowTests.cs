@@ -67,6 +67,44 @@ public sealed class DocumentWorkflowTests : IDisposable
     }
 
     [Fact]
+    public void ShowsProductNameInTheRowAndRecognitionChoices()
+    {
+        var row = ConfirmedRow("assembly.pdf");
+        var candidate = new Candidate("A СБ", "Корпус Сборочный чертёж", 1, 0, new(Area.Full, Area.Full), "OCR");
+        row.Apply(new(RecognitionStatus.Review, 1, [candidate], "Review") { SourceHash = row.SourceHash });
+
+        Assert.Equal("Корпус", row.DocumentName);
+        Assert.Equal("Лист 1 · A СБ - Корпус", DocumentRow.CandidateLabel(Assert.Single(row.Candidates)));
+        Assert.Equal("A СБ_Корпус.pdf", row.NewName);
+        Assert.True(row.Confirm(row.SourceHash!));
+        Assert.Equal(row.NewName, Path.GetFileName(Assert.Single(RenameService.Preview([row.Request])).Target));
+    }
+
+    [Fact]
+    public void TypeOnlyRecognitionCanBeConfirmedWithAnEmptyVisibleName()
+    {
+        var row = ConfirmedRow("specification.pdf");
+        var typeOnly = new Candidate("A", "Спецификация", 1, 0, new(Area.Full, Area.Full), "OCR");
+        var missing = typeOnly with { Name = "", Page = 2 };
+        row.Apply(new(RecognitionStatus.Review, 2, [typeOnly, missing], "Review") { SourceHash = row.SourceHash });
+
+        row.Use(typeOnly);
+        Assert.Empty(row.DocumentName);
+        Assert.Equal("Лист 1 · A", DocumentRow.CandidateLabel(typeOnly));
+        Assert.True(row.HasDocumentName);
+        Assert.Contains("используется обозначение", row.Diagnostic);
+        Assert.True(row.Confirm(row.SourceHash!));
+        Assert.Equal("A.pdf", row.NewName);
+        Assert.Equal(row.NewName, Path.GetFileName(Assert.Single(RenameService.Preview([row.Request])).Target));
+
+        row.Use(missing);
+        Assert.Empty(row.DocumentName);
+        Assert.False(row.HasDocumentName);
+        Assert.Empty(row.NewName);
+        Assert.False(row.Confirm(row.SourceHash!));
+    }
+
+    [Fact]
     public void ConfirmationExplainsForbiddenCharactersAndAllowsCorrection()
     {
         var row = ConfirmedRow("invalid-name.pdf");

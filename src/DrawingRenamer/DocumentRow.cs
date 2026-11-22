@@ -24,7 +24,8 @@ public sealed partial class DocumentRow : ObservableObject
     public Candidate? SelectedCandidate { get; private set; }
     public IReadOnlyList<Candidate> Candidates => Result?.Candidates ?? [];
     public Dictionary<int, int> PageRotations { get; } = [];
-    public RenameRequest Request => new(Source, Designation, DocumentName)
+    internal bool HasDocumentName => !string.IsNullOrWhiteSpace(NameForRename);
+    public RenameRequest Request => new(Source, Designation, NameForRename)
     {
         ExpectedHash = SourceHash ?? throw new InvalidOperationException("Сначала подтвердите версию PDF."),
         PageRotations = PageRotations.Count == 0 ? null : new Dictionary<int, int>(PageRotations)
@@ -33,10 +34,14 @@ public sealed partial class DocumentRow : ObservableObject
     {
         get
         {
-            RenameService.FileName(Designation, DocumentName, out var error);
+            RenameService.FileName(Designation, NameForRename, out var error);
             return error;
         }
     }
+
+    // Rename validation uses the original title to recognize a document whose title contains only its type.
+    private string NameForRename => SelectedCandidate is { } candidate &&
+        DocumentName == (candidate.NameWithoutDocumentType ?? "") ? candidate.Name : DocumentName;
 
     public void Apply(RecognitionResult result)
     {
@@ -67,16 +72,24 @@ public sealed partial class DocumentRow : ObservableObject
 
     public void Use(Candidate candidate)
     {
-        Confirmed = false;
-        Status = "Проверить";
         SelectedCandidate = candidate;
         if (candidate.Turn == 0) PageRotations.Remove(candidate.Page);
         else PageRotations[candidate.Page] = candidate.Turn;
         Designation = candidate.Designation;
-        DocumentName = candidate.Name;
-        Diagnostic = NameError ?? (candidate.OcrConfidence is { } confidence
-            ? $"Лист {candidate.Page} · OCR {confidence:P0}. Проверьте обе графы."
-            : $"Лист {candidate.Page} · Проверьте обе графы.");
+        DocumentName = candidate.NameWithoutDocumentType ?? "";
+        Edited();
+        var source = candidate.OcrConfidence is { } confidence ? $"Лист {candidate.Page} · OCR {confidence:P0}." : $"Лист {candidate.Page} ·";
+        var guidance = DocumentName.Length == 0 && HasDocumentName
+            ? "Для имени файла используется обозначение."
+            : "Проверьте обе графы.";
+        Diagnostic = NameError ?? $"{source} {guidance}";
+        OnPropertyChanged(nameof(HasDocumentName));
+    }
+
+    internal static string CandidateLabel(Candidate candidate)
+    {
+        var label = $"Лист {candidate.Page} · {candidate.Designation}";
+        return candidate.NameWithoutDocumentType is { Length: > 0 } name ? $"{label} - {name}" : label;
     }
 
     public void ApplySavedRotations(IReadOnlyDictionary<int, int> rotations, string hash)
@@ -135,7 +148,7 @@ public sealed partial class DocumentRow : ObservableObject
     private void Edited()
     {
         Confirmed = false;
-        var name = RenameService.FileName(Designation, DocumentName, out var error);
+        var name = RenameService.FileName(Designation, NameForRename, out var error);
         NewName = name ?? "";
         Status = "Проверить";
         Diagnostic = error ?? "Подтвердите введённые значения.";
