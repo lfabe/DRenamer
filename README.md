@@ -6,7 +6,7 @@
 
 Drawing Renamer пакетно переименовывает PDF-чертежи по схеме `Обозначение_Наименование.pdf`, например `АБВГ.123456.001_Корпус.pdf`. Приложение извлекает данные из основной надписи ЕСКД. Чтение PDF, предпросмотр и OCR выполняются локально.
 
-Переносимая программа для Windows 10/11 x64. Архив выпуска включает .NET, Windows App SDK, Visual C++ Runtime, нативные библиотеки и модели OCR для русского и английского.
+Переносимая программа для Windows 10/11 x64. Архив выпуска включает .NET, Windows App SDK, Visual C++ Runtime, нативные библиотеки и модели PP-OCRv5 для русского и английского.
 
 [Скачать для Windows](https://github.com/lfabe/DRenamer/releases/latest) · [Пример шаблона JSON](docs/template-example.json) · [Лицензии зависимостей](docs/licenses/README.md)
 

@@ -1,10 +1,10 @@
 namespace DrawingRenamer;
 
-internal sealed record ScanTitle(FieldRegions Regions, int Turn, double Slope, IReadOnlyList<Area> NameLines)
+internal sealed record ScanTitle(FieldRegions Regions, int Turn, double Slope, IReadOnlyList<Area> NameLines, TitleTemplate Template)
 {
     internal ScanTitle OnOriginalPage(int turn) => new(new(Regions.Designation.Rotate(-turn),
         Regions.Name.Rotate(-turn), Regions.TitleBlock?.Rotate(-turn)), turn, Slope,
-        NameLines.Select(line => line.Rotate(-turn)).ToArray());
+        NameLines.Select(line => line.Rotate(-turn)).ToArray(), Template);
 }
 
 internal sealed class ScanTitleLocator(Raster raster, int turn)
@@ -23,7 +23,7 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
             IEnumerable<ScanTitle> Matches(ScanTitleLocator v) =>
                 layouts.SelectMany(g => new[] { 1d, .75, .5 }.SelectMany(scale =>
                     v.Match(g, g.Key * pixelsPerMm * scale, token)))
-                    .DistinctBy(s => (s.Regions, s.Turn, s.Slope));
+                    .DistinctBy(s => (s.Regions, s.Turn, s.Slope, s.Template));
             var found = Matches(view).ToList();
             if (turn != 0 && found.Count > 0)
             {
@@ -32,7 +32,13 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
                 var refined = Matches(upright).Select(s => s.OnOriginalPage(turn)).ToList();
                 if (refined.Count > 0) found = refined;
             }
-            foreach (var stamp in found) yield return stamp;
+            foreach (var stamp in found)
+            {
+                if (TitleTemplate.Defaults.Contains(stamp.Template) && found.Any(other =>
+                    !TitleTemplate.Defaults.Contains(other.Template) &&
+                    TitleLocator.SameFrame(other.Regions.TitleBlock!.Value, stamp.Regions.TitleBlock!.Value))) continue;
+                yield return stamp;
+            }
         }
     }
 
@@ -72,7 +78,7 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
                 var name = FitText(grid, template.Title, lines);
                 if (!name.IsValid) continue;
                 var frame = grid.Bounds(width, height).Rotate(-turn);
-                yield return new(new(designation, name, frame), turn, slope, lines);
+                yield return new(new(designation, name, frame), turn, slope, lines, template);
             }
         }
     }

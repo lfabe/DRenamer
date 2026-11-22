@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
 namespace DrawingRenamer;
@@ -42,31 +41,19 @@ public sealed record Raster(int Width, int Height, byte[] Pixels)
         return result;
     }
 
-    // PDFium returns BGRx. BMP also gives Leptonica an in-memory input with no temporary files.
-    internal byte[] ToBmp(int turns, double horizontalShear)
+    internal Raster Orient(int turns, double horizontalShear = 0)
     {
+        turns &= 3;
+        if (turns == 0 && horizontalShear == 0) return this;
         var rotatedWidth = (turns & 1) == 0 ? Width : Height;
         var rotatedHeight = (turns & 1) == 0 ? Height : Width;
-        var padding = horizontalShear == 0 ? 0 : Math.Min(rotatedWidth, rotatedHeight) / 6;
-        var width = rotatedWidth + 2 * padding + (int)Math.Round((rotatedHeight - 1) * horizontalShear);
-        var height = rotatedHeight + 2 * padding;
-        var bmp = new byte[54 + 4 * width * height];
-        if (horizontalShear != 0) bmp.AsSpan(54).Fill(255);
-        bmp[0] = (byte)'B';
-        bmp[1] = (byte)'M';
-        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(2), bmp.Length);
-        bmp[10] = 54;
-        bmp[14] = 40;
-        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(18), width);
-        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(22), height);
-        bmp[26] = 1;
-        bmp[28] = 32;
-        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(38), 11811);
-        BinaryPrimitives.WriteInt32LittleEndian(bmp.AsSpan(42), 11811);
+        var width = rotatedWidth + (int)Math.Round((rotatedHeight - 1) * horizontalShear);
+        var result = new Raster(width, rotatedHeight, new byte[4 * width * rotatedHeight]);
+        if (horizontalShear != 0) result.Pixels.AsSpan().Fill(255);
         for (var y = 0; y < Height; y++)
         for (var x = 0; x < Width; x++)
         {
-            var (dx, dy) = (turns & 3) switch
+            var (dx, dy) = turns switch
             {
                 1 => (Height - 1 - y, x),
                 2 => (Width - 1 - x, Height - 1 - y),
@@ -75,10 +62,10 @@ public sealed record Raster(int Width, int Height, byte[] Pixels)
             };
             var from = 4 * (y * Width + x);
             var shift = (int)Math.Round(dy * horizontalShear);
-            var to = 54 + 4 * ((height - 1 - padding - dy) * width + padding + dx + shift);
-            Pixels.AsSpan(from, 3).CopyTo(bmp.AsSpan(to, 3));
+            var to = 4 * (dy * width + dx + shift);
+            Pixels.AsSpan(from, 4).CopyTo(result.Pixels.AsSpan(to, 4));
         }
-        return bmp;
+        return result;
     }
 
     internal IEnumerable<Segment> FindLines(Area frame, CancellationToken token)

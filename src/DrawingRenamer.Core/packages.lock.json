@@ -8,33 +8,33 @@
         "resolved": "157.0.8100",
         "contentHash": "OeimMc5Zn7XFuiczK1/C88Xfe3Ney4fxIxnhKfO44TVIvMhNqEbkbrRYaFGS5SMveaw3uDG0lewgV9qICZjpAQ=="
       },
+      "Microsoft.ML.OnnxRuntime": {
+        "type": "Direct",
+        "requested": "[1.24.4, )",
+        "resolved": "1.24.4",
+        "contentHash": "895huFBVrZkZEGjlsxBSZD3p6D32Cdz6q8DM9UcUps2YKFYdFR8TefaTggFBUTYlvcSyfNTpmOOU/ZkeL69izw==",
+        "dependencies": {
+          "Microsoft.ML.OnnxRuntime.Managed": "1.24.4"
+        }
+      },
       "PdfPig": {
         "type": "Direct",
         "requested": "[0.1.16, )",
         "resolved": "0.1.16",
         "contentHash": "qQcbsNMYVY+K5ELptax2S8thNMk0+rSQq3H/KdYj3LLcko8yTCz8y5KIvsKxIyAuTN0ZYNnfsZkM+0EvxTwHVA=="
       },
-      "TesseractOCR": {
-        "type": "Direct",
-        "requested": "[5.5.2, )",
-        "resolved": "5.5.2",
-        "contentHash": "m/B0uXLq7JvXfsn+KJtB8iiBJaySEUH13P3x0q9hvnXZ5QnN4+9KcFQaLFE5hwVZD1zGOy2KLxN4B9A1HxvtPQ==",
+      "Microsoft.ML.OnnxRuntime.Managed": {
+        "type": "Transitive",
+        "resolved": "1.24.4",
+        "contentHash": "e5jsEo0HcCKDMkuRsMSievKoMv10Odv4MGmxbCin8SEm4Pto1qTpwti47xRwMtk9I/zVvfAiFIWquOq/0+22DA==",
         "dependencies": {
-          "Microsoft.Extensions.Logging.Abstractions": "10.0.3"
+          "System.Numerics.Tensors": "9.0.0"
         }
       },
-      "Microsoft.Extensions.DependencyInjection.Abstractions": {
+      "System.Numerics.Tensors": {
         "type": "Transitive",
-        "resolved": "10.0.10",
-        "contentHash": "z/2xXlFw2aLGjHyEm6E0tQ+In6VfzQzTrtArbQ2c0TQE16ZbyDCMGPvaUT9I0s8rgy9sRWlU2P9waW37qV04qA=="
-      },
-      "Microsoft.Extensions.Logging.Abstractions": {
-        "type": "Transitive",
-        "resolved": "10.0.10",
-        "contentHash": "zkFxGYUvdxAvIKTyXHrmW+Sux53D4SezD9dMyZ6hrwwzPQJNuwCRy1f5W7AvYTqacEGhWF2XderRQG1OvbV8og==",
-        "dependencies": {
-          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.10"
-        }
+        "resolved": "9.0.0",
+        "contentHash": "hyJB4UlpAi19Xr9AXzu2NuagKC4lPfHObNMEAA0HmqFz2rX7wKgzeYzO/jM/eBHDhnUGFFEjk5cOoJaxqg5J4A=="
       }
     }
   }

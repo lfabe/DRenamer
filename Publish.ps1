@@ -43,7 +43,9 @@ $licenseDocs = New-Item -ItemType Directory -Path (Join-Path $docs.FullName 'lic
 Copy-Item -LiteralPath "$PSScriptRoot/docs/licenses/README.md" -Destination $licenseDocs.FullName -Force
 
 $required = @('DrawingRenamer.exe', 'DrawingRenamer.pri', 'coreclr.dll', 'pdfium.dll',
-    'x64/tesseract55.dll', 'x64/leptonica-1.85.0.dll', 'tessdata/eng.traineddata', 'tessdata/rus.traineddata')
+    'onnxruntime.dll', 'onnxruntime_providers_shared.dll',
+    'ppocr/en_PP-OCRv5_rec_mobile.onnx', 'ppocr/eslav_PP-OCRv5_rec_mobile.onnx',
+    'licenses/ppocr.txt', 'licenses/onnxruntime/LICENSE.txt', 'licenses/onnxruntime/ThirdPartyNotices.txt')
 foreach ($file in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $Output $file) -PathType Leaf)) {
         throw "В публикации отсутствует $file."

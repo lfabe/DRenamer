@@ -7,8 +7,9 @@
     <InternalsVisibleTo Include="DrawingRenamer.Tests" />
     <PackageReference Include="PdfPig" Version="0.1.16" />
     <PackageReference Include="bblanchon.PDFium.Win32" Version="157.0.8100" />
-    <PackageReference Include="TesseractOCR" Version="5.5.2" GeneratePathProperty="true" ExcludeAssets="build" />
-    <None Include="$(PkgTesseractOCR)/x64/*.dll" Link="x64/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
-    <None Update="Assets/tessdata/*.traineddata" Link="tessdata/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" GeneratePathProperty="true" />
+    <None Update="Assets/ppocr/*.onnx" Link="ppocr/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="$(PkgMicrosoft_ML_OnnxRuntime)/LICENSE" Link="licenses/onnxruntime/LICENSE.txt" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="$(PkgMicrosoft_ML_OnnxRuntime)/ThirdPartyNotices.txt" Link="licenses/onnxruntime/ThirdPartyNotices.txt" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
