@@ -89,7 +89,7 @@ dotnet test tests/DrawingRenamer.Tests -c Release --no-build
 
 ### Создание собственного ZIP-выпуска
 
-Скрипт `Publish.ps1` публикует приложение вместе со средой выполнения, моделями OCR, документацией и лицензиями в `artifacts/DrawingRenamer-win-x64`. Он также копирует `msvcp140.dll`, `vcruntime140.dll` и `vcruntime140_1.dll` из каталога `Microsoft.VC143.CRT` для x64. Поиск этого каталога использует Visual Studio с установленным компонентом MSVC v143.
+Скрипт `Publish.ps1` публикует приложение вместе со средой выполнения, моделями OCR, документацией и лицензиями в `artifacts/DrawingRenamer-win-x64`. Он также копирует `msvcp140.dll`, `msvcp140_1.dll`, `vcruntime140.dll` и `vcruntime140_1.dll` из каталога `Microsoft.VC143.CRT` для x64. Поиск этого каталога использует Visual Studio с установленным компонентом MSVC v143.
 
 Выполните из корня репозитория. Команда `pwsh` использует PowerShell 7. [Установка PowerShell](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)
 

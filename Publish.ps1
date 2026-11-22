@@ -20,7 +20,7 @@ if (-not $VcRedistDirectory) {
     throw 'Укажите папку Microsoft.VC143.CRT для x64 через -VcRedistDirectory.'
 }
 
-$crtFiles = 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'
+$crtFiles = 'msvcp140.dll', 'msvcp140_1.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'
 foreach ($file in $crtFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $VcRedistDirectory $file) -PathType Leaf)) {
         throw "В папке Visual C++ Runtime отсутствует $file."
