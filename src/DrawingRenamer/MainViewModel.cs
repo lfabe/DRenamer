@@ -221,16 +221,34 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     public Task ConfirmAsync(DocumentRow row) => WorkAsync(async () =>
+        Message = await ConfirmRowAsync(row) ? "Значения подтверждены." : row.Diagnostic);
+
+    public Task ConfirmSelectedAsync(IEnumerable<DocumentRow> selection)
+    {
+        var selected = selection.ToHashSet();
+        var batch = Rows.Where(selected.Contains).ToArray();
+        if (batch.Length == 0) return Task.CompletedTask;
+
+        return WorkAsync(async () =>
+        {
+            var confirmed = 0;
+            Progress = 0;
+            for (var i = 0; i < batch.Length; i++)
+            {
+                var row = batch[i];
+                Message = $"Подтверждение {i + 1} из {batch.Length} · {row.OriginalName}";
+                if (await ConfirmRowAsync(row)) confirmed++;
+                Progress = 100d * (i + 1) / batch.Length;
+            }
+            Message = $"Подтверждено: {confirmed} из {batch.Length}. Требуют проверки: {batch.Length - confirmed}.";
+        });
+    }
+
+    private static async Task<bool> ConfirmRowAsync(DocumentRow row)
     {
         var hash = await Task.Run(() => ReadVersion(row.Source));
-        if (hash is null)
-        {
-            row.ObserveVersion(null);
-            Message = row.Diagnostic;
-            return;
-        }
-        Message = row.Confirm(hash) ? "Значения подтверждены." : row.Diagnostic;
-    });
+        return hash is null ? row.ObserveVersion(null) : row.Confirm(hash);
+    }
 
     public async Task MoveAsync(IReadOnlyList<RenameRequest>? requests, IReadOnlyList<MoveResult>? skipped = null,
         string? destination = null, bool removeOriginals = false)

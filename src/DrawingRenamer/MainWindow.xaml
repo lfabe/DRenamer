@@ -51,6 +51,8 @@
                     </Button.KeyboardAccelerators>
                 </Button>
                 <Button x:Name="AnalyzeButton" Content="Распознать" Command="{x:Bind ViewModel.AnalyzeCommand}"/>
+                <Button x:Name="ConfirmButton" Content="Подтвердить" Click="ConfirmSelected"
+                        ToolTipService.ToolTip="Подтвердить значения в выделенных строках"/>
                 <Button x:Name="CancelButton" Content="Остановить анализ" Visibility="Collapsed"
                         Command="{x:Bind ViewModel.CancelCommand}"/>
             </StackPanel>
@@ -76,7 +78,7 @@
                         <TextBlock Grid.Column="4" Text="Новое имя" Style="{StaticResource CaptionTextBlockStyle}"/>
                         <TextBlock Grid.Column="5" Text="Статус" Style="{StaticResource CaptionTextBlockStyle}"/>
                     </Grid>
-                    <ListView x:Name="Documents" Grid.Row="1" ItemsSource="{x:Bind ViewModel.Rows}"
+                    <ListView x:Name="Documents" Grid.Row="1" ItemsSource="{x:Bind ViewModel.Rows}" SelectionMode="Extended"
                               SelectedItem="{x:Bind ViewModel.Selected, Mode=TwoWay}" SelectionChanged="SelectionChanged"
                               KeyDown="DocumentsKeyDown" AutomationProperties.Name="Документы">
                         <ListView.ItemContainerStyle>
@@ -213,7 +215,7 @@
             <TextBlock Text="{x:Bind ViewModel.Message, Mode=OneWay}" TextTrimming="CharacterEllipsis"
                        Style="{StaticResource CaptionTextBlockStyle}" AutomationProperties.LiveSetting="Polite"/>
             <ProgressBar Grid.Column="1" Value="{x:Bind ViewModel.Progress, Mode=OneWay}" Maximum="100"
-                         AutomationProperties.Name="Ход анализа"/>
+                         AutomationProperties.Name="Ход обработки"/>
         </Grid>
     </Grid>
 </Window>

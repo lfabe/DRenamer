@@ -55,6 +55,38 @@ public sealed class DocumentWorkflowTests : IDisposable
     }
 
     [Fact]
+    public async Task BatchConfirmationUsesSelectedRowsAndReportsFilesThatNeedReview()
+    {
+        var model = new MainViewModel();
+        var missing = ConfirmedRow("missing.pdf");
+        var changed = ConfirmedRow("changed.pdf");
+        var invalid = ConfirmedRow("invalid.pdf");
+        var valid = ConfirmedRow("valid.pdf");
+        var unselected = ConfirmedRow("unselected.pdf");
+        foreach (var row in new[] { missing, changed, invalid, valid, unselected }) model.Rows.Add(row);
+        File.Delete(missing.Source);
+        File.AppendAllText(changed.Source, "changed");
+        invalid.DocumentName = "PART/01";
+        valid.DocumentName = "PART 02";
+        valid.Included = false;
+        unselected.DocumentName = "PART 03";
+
+        await model.ConfirmSelectedAsync([missing, changed, invalid, valid, valid]);
+
+        Assert.True(valid.Confirmed);
+        Assert.False(unselected.Confirmed);
+        Assert.False(missing.Confirmed);
+        Assert.Contains("версию исходного PDF", missing.Diagnostic);
+        Assert.False(changed.Confirmed);
+        Assert.Contains("PDF изменился", changed.Diagnostic);
+        Assert.False(invalid.Confirmed);
+        Assert.Contains("U+002F", invalid.Diagnostic);
+        Assert.Equal("Подтверждено: 1 из 4. Требуют проверки: 3.", model.Message);
+        Assert.Equal(100, model.Progress);
+        Assert.False(model.Busy);
+    }
+
+    [Fact]
     public void SelectingRecognitionOrientsThePreviewAndRenameRequest()
     {
         var row = ConfirmedRow("rotated.pdf");

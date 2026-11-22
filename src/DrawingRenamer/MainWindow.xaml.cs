@@ -92,6 +92,7 @@ public sealed partial class MainWindow : Window
         RecursiveCheckBox.IsEnabled = available;
         RefreshButton.IsEnabled = available && ViewModel.HasDocumentSources;
         AnalyzeButton.IsEnabled = available && ViewModel.Rows.Count > 0;
+        ConfirmButton.IsEnabled = available && Documents.SelectedItems.Count > 0;
         CancelButton.Visibility = ViewModel.AnalyzeCommand.IsRunning ? Visibility.Visible : Visibility.Collapsed;
         RenameButton.IsEnabled = available && ViewModel.Rows.Count > 0;
         UndoButton.IsEnabled = available && ViewModel.CanUndo;
@@ -241,8 +242,11 @@ public sealed partial class MainWindow : Window
 
     private async void SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        UpdateCommands();
+        var selected = Documents.SelectedItem as DocumentRow;
+        if (current == selected) return;
         if (current is not null) current.PropertyChanged -= RowChanged;
-        current = Documents.SelectedItem as DocumentRow;
+        current = selected;
         if (current is not null) current.PropertyChanged += RowChanged;
         Editor.DataContext = current;
         Editor.Visibility = current is null ? Visibility.Collapsed : Visibility.Visible;
@@ -558,6 +562,12 @@ public sealed partial class MainWindow : Window
         await ViewModel.ConfirmAsync(row);
     }
 
+    private async void ConfirmSelected(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments)
+            await ViewModel.ConfirmSelectedAsync(Documents.SelectedItems.OfType<DocumentRow>());
+    }
+
     private async void SaveRegions(object sender, RoutedEventArgs e) => await ExportRegionsAsync();
 
     private async Task ExportRegionsAsync()
@@ -665,7 +675,7 @@ public sealed partial class MainWindow : Window
         var requests = selected.Where(row => row.Confirmed).Select(row => row.Request).ToArray();
         var unconfirmed = selected.Where(row => !row.Confirmed).Select(row =>
             new MoveResult(row.Source, null, MoveStatus.Skipped,
-                row.NameError ?? "Нажмите «Подтвердить значения» после проверки обеих граф.")).ToArray();
+                row.NameError ?? "После проверки граф выделите строку и нажмите «Подтвердить».")).ToArray();
         string? destination = null;
         string? pickerError = null;
         var preserveRotations = true;
