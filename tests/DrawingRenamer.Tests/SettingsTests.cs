@@ -12,6 +12,8 @@ public sealed class SettingsTests : IDisposable
         (TitleTemplate.Defaults[0] with { Name = "Saved template" }).Save(templatePath, newFile: true);
         var first = new MainViewModel(SettingsFile) { ThemeIndex = 2, SeparatorInput = " - ", OcrEnabled = false, Languages = "eng" };
         first.SetTemplates(templatePath);
+        first.SetScannerFolder(folder);
+        first.ScannerWatchEnabled = true;
         await first.SaveSettingsAsync();
         Assert.True(File.Exists(SettingsFile));
 
@@ -23,6 +25,8 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal("eng", restored.Languages);
         Assert.Equal(2, restored.LanguageIndex);
         Assert.Equal(templatePath, restored.TemplatePath);
+        Assert.Equal(folder, restored.ScannerFolderLabel);
+        Assert.True(restored.ScannerWatchEnabled);
         Assert.Contains("Saved template", (await restored.LoadRecognitionOptionsAsync()).Templates!.Select(t => t.Name));
     }
 
@@ -58,6 +62,8 @@ public sealed class SettingsTests : IDisposable
         TitleTemplate.Defaults[0].Save(templatePath, newFile: true);
         var model = new MainViewModel(SettingsFile) { ThemeIndex = 1, SeparatorInput = "#", OcrEnabled = false, Languages = "rus+eng" };
         model.SetTemplates(templatePath);
+        model.SetScannerFolder(folder);
+        model.ScannerWatchEnabled = true;
         await model.SaveSettingsAsync();
         model.SeparatorInput = "_уу";
         await model.ResetSettingsAsync();
@@ -136,6 +142,8 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(0, model.LanguageIndex);
         Assert.Null(model.TemplatePath);
         Assert.Equal("Встроенные шаблоны ЕСКД", model.TemplateLabel);
+        Assert.False(model.HasScannerFolder);
+        Assert.False(model.ScannerWatchEnabled);
     }
 
     public void Dispose() => Directory.Delete(folder, true);

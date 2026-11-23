@@ -50,6 +50,69 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public async Task ScannerWaitsForTheWriterAndRequiresOperatorConfirmation()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var path = Path.Combine(inbox, "incoming.pdf");
+        var bytes = File.ReadAllBytes(Pdf(Sheet(595, 842, 0)));
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"));
+        model.SetScannerFolder(inbox);
+        using (var writer = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite))
+        {
+            writer.Write(bytes[..32]);
+            writer.Flush();
+            await model.CheckScannerFolderAsync(() => true);
+            Assert.Empty(model.Rows);
+
+            model.ScannerWatchEnabled = true;
+            await model.CheckScannerFolderAsync(() => true);
+            await model.CheckScannerFolderAsync(() => true);
+            Assert.Empty(model.Rows);
+            writer.Write(bytes[32..]);
+        }
+
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Empty(model.Rows);
+        await model.CheckScannerFolderAsync(() => true);
+        var row = Assert.Single(model.Rows);
+        Assert.Equal("ABCD.123456.001", row.Designation);
+        Assert.Equal("MAIN HOUSING", row.DocumentName);
+        Assert.Equal("Проверить", row.Status);
+        Assert.False(row.Confirmed);
+        await model.ConfirmAsync(row);
+        Assert.True(row.Confirmed);
+    }
+
+    [Fact]
+    public async Task ScannerProcessesArrivalsAfterReenablingAndRespectsRemoval()
+    {
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"));
+        model.SetScannerFolder(folder);
+        var path = Path.Combine(folder, "new.pdf");
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "scan-form1.pdf"), path);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Empty(model.Rows);
+
+        model.ScannerWatchEnabled = true;
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => false);
+        Assert.Empty(model.Rows);
+        await model.CheckScannerFolderAsync(() => true);
+        var row = Assert.Single(model.Rows);
+        Assert.Equal("АБВГ.123456.001", row.Designation);
+        Assert.Equal("Проверить", row.Status);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Same(row, Assert.Single(model.Rows));
+
+        model.RemoveDocuments([row]);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Empty(model.Rows);
+        Assert.True(File.Exists(path));
+    }
+
+    [Fact]
     public void LaterTitleSheetsAreFoundAndDifferentPairsRequireReview()
     {
         var analyzer = new DrawingAnalyzer();

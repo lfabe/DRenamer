@@ -37,6 +37,15 @@
                                     <ComboBoxItem Content="Русский и английский" Tag="rus+eng"/>
                                     <ComboBoxItem Content="Английский" Tag="eng"/>
                                 </ComboBox>
+                                <StackPanel Spacing="4" MaxWidth="340">
+                                    <Button Content="Папка сканера…" Click="PickScannerFolder"/>
+                                    <TextBlock Text="{x:Bind ViewModel.ScannerFolderLabel, Mode=OneWay}" TextWrapping="Wrap"
+                                               ToolTipService.ToolTip="{x:Bind ViewModel.ScannerFolderLabel, Mode=OneWay}"/>
+                                    <ToggleSwitch Header="Автораспознавание сканов" OnContent="Включено" OffContent="Выключено"
+                                                  IsOn="{x:Bind ViewModel.ScannerWatchEnabled, Mode=TwoWay}"
+                                                  IsEnabled="{x:Bind ViewModel.HasScannerFolder, Mode=OneWay}"
+                                                  ToolTipService.ToolTip="Для автоанализа PDF в папке сканера включите распознавание OCR."/>
+                                </StackPanel>
                                 <TextBlock Text="{x:Bind ViewModel.TemplateLabel, Mode=OneWay}" TextWrapping="Wrap"/>
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button Content="Добавить JSON" Click="PickTemplates"/>

@@ -61,6 +61,9 @@ public sealed partial class MainWindow : Window
         ViewModel.PropertyChanged += ViewModelChanged;
         ViewModel.AnalyzeCommand.PropertyChanged += (_, _) => UpdateCommands();
         ViewModel.Rows.CollectionChanged += (_, _) => UpdateCommands();
+        var scannerTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        scannerTimer.Tick += async (_, _) => await ViewModel.CheckScannerFolderAsync(() => CanChangeDocuments);
+        scannerTimer.Start();
         Activated += async (_, args) =>
         {
             if (args.WindowActivationState != WindowActivationState.Deactivated)
@@ -76,6 +79,7 @@ public sealed partial class MainWindow : Window
         Closed += (_, _) =>
         {
             closing = true;
+            scannerTimer.Stop();
             preview?.Cancel();
             ViewModel.CancelCommand.Execute(null);
         };
@@ -103,7 +107,7 @@ public sealed partial class MainWindow : Window
         RefreshButton.IsEnabled = available && ViewModel.HasDocumentSources;
         AnalyzeButton.IsEnabled = available && ViewModel.Rows.Count > 0;
         ConfirmButton.IsEnabled = available && Documents.SelectedItems.Count > 0;
-        CancelButton.Visibility = ViewModel.AnalyzeCommand.IsRunning ? Visibility.Visible : Visibility.Collapsed;
+        CancelButton.Visibility = ViewModel.Busy && ViewModel.IsAnalyzing ? Visibility.Visible : Visibility.Collapsed;
         RenameButton.IsEnabled = available && ViewModel.Rows.Count > 0 && ViewModel.SeparatorError is null;
         SeparatorInput.IsEnabled = available;
         SettingsContainer.IsEnabled = available;
@@ -141,14 +145,20 @@ public sealed partial class MainWindow : Window
         finally { choosingDocuments = false; if (!closing) UpdateCommands(); }
     }
 
-    private async void PickFolder(object sender, RoutedEventArgs e)
+    private async void PickFolder(object sender, RoutedEventArgs e) => await PickDocumentFolderAsync(scanner: false);
+
+    private async void PickScannerFolder(object sender, RoutedEventArgs e) => await PickDocumentFolderAsync(scanner: true);
+
+    private async Task PickDocumentFolderAsync(bool scanner)
     {
+        if (!CanChangeDocuments) return;
         choosingDocuments = true;
         UpdateCommands();
         try
         {
-            if (await PickFolderPathAsync() is { } path && !closing)
-                await ViewModel.AddDocumentsAsync([], path);
+            if (await PickFolderPathAsync() is not { } path || closing) return;
+            if (scanner) ViewModel.SetScannerFolder(path);
+            else await ViewModel.AddDocumentsAsync([], path);
         }
         catch (Exception ex) { ViewModel.Message = $"Не удалось выбрать папку ({ex.GetType().Name})."; }
         finally { choosingDocuments = false; if (!closing) UpdateCommands(); }
