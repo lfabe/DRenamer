@@ -160,6 +160,10 @@
                                     AutomationProperties.Name="Повернуть лист на 90° влево" ToolTipService.ToolTip="Повернуть лист на 90° влево"/>
                             <Button x:Name="RotateRightButton" Content="↷" Click="RotateRight" IsEnabled="False"
                                     AutomationProperties.Name="Повернуть лист на 90° вправо" ToolTipService.ToolTip="Повернуть лист на 90° вправо"/>
+                            <Button x:Name="FitPageButton" Click="FitPage" IsEnabled="False"
+                                    AutomationProperties.Name="Вписать страницу целиком" ToolTipService.ToolTip="Вписать страницу целиком">
+                                <FontIcon Glyph="&#xE9A6;" FontSize="16"/>
+                            </Button>
                         </StackPanel>
                     </Grid>
                     <Border Grid.Row="1" MinHeight="140" CornerRadius="4" Background="{ThemeResource SubtleFillColorSecondaryBrush}">

@@ -112,6 +112,7 @@ public sealed partial class MainWindow : Window
         Editor.IsHitTestVisible = available;
         Documents.IsEnabled = available;
         RotateLeftButton.IsEnabled = RotateRightButton.IsEnabled = available && PageImage.Source is not null;
+        FitPageButton.IsEnabled = PageImage.Source is not null;
         ToggleRegionsButton.IsEnabled = StartManualRegionsButton.IsEnabled = available;
         MarkDesignationButton.IsEnabled = MarkNameButton.IsEnabled = MarkStampButton.IsEnabled = available;
         ReadRegionsButton.IsEnabled = SaveRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
@@ -349,7 +350,6 @@ public sealed partial class MainWindow : Window
             await bitmap.SetBitmapAsync(buffer);
             operation.Token.ThrowIfCancellationRequested();
             sheetSize = (result.raster.Width, result.raster.Height);
-            FitSheet();
             PageImage.Source = bitmap;
             UpdateCommands();
             pageCount = result.count;
@@ -359,10 +359,14 @@ public sealed partial class MainWindow : Window
             PreviewMessage.Visibility = Visibility.Collapsed;
             RegionControls.Visibility = Visibility.Visible;
             UpdateRegionGuidance();
+            Area? frame = null;
             if (row.SelectedCandidate is { } candidate && candidate.Page == page)
+            {
                 Orientation.SelectedIndex = (candidate.Turn - PreviewTurn) & 3;
+                if (row.Status == "Проверить") frame = candidate.Regions.TitleBlock;
+            }
             else Orientation.SelectedIndex = 0;
-            PaintRegions();
+            FitSheet(frame);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) when (ex is not OutOfMemoryException)
@@ -382,6 +386,7 @@ public sealed partial class MainWindow : Window
 
     private void RotateLeft(object sender, RoutedEventArgs e) => RotateSheet(-90);
     private void RotateRight(object sender, RoutedEventArgs e) => RotateSheet(90);
+    private void FitPage(object sender, RoutedEventArgs e) => FitSheet();
 
     private void RotateSheet(int degrees)
     {
@@ -392,15 +397,19 @@ public sealed partial class MainWindow : Window
         else row.PageRotations[page] = turns;
         Orientation.SelectedIndex = 0;
         FitSheet();
-        PaintRegions();
     }
 
-    private void FitSheet()
+    private void FitSheet(Area? frame = null)
     {
+        if (PageImage.Source is null) return;
+        PreviewScroll.ChangeView(0, 0, 1, true);
+        Root.UpdateLayout();
         var (width, height) = sheetSize;
-        var (extentWidth, extentHeight) = SheetRotation.Angle % 180 == 0 ? (width, height) : (height, width);
-        var scale = Math.Min(Math.Max(100, PreviewScroll.ActualWidth - 16) / extentWidth,
-            Math.Max(100, PreviewScroll.ActualHeight - 58) / extentHeight);
+        var turn = PreviewTurn;
+        var (extentWidth, extentHeight) = (turn & 1) == 0 ? (width, height) : (height, width);
+        var focus = frame is { IsValid: true } block ? block.Rotate(turn) : Area.Full;
+        var scale = Math.Min(Math.Max(1, PreviewScroll.ActualWidth - 16) / (extentWidth * focus.Width),
+            Math.Max(1, PreviewScroll.ActualHeight - 16) / (extentHeight * focus.Height));
         SheetExtent.Width = extentWidth * scale;
         SheetExtent.Height = extentHeight * scale;
         Sheet.Width = PageImage.Width = width * scale;
@@ -408,7 +417,14 @@ public sealed partial class MainWindow : Window
         // Keep the rotated sheet centered inside the scrollable bounds.
         Canvas.SetLeft(Sheet, (SheetExtent.Width - Sheet.Width) / 2);
         Canvas.SetTop(Sheet, (SheetExtent.Height - Sheet.Height) / 2);
-        PreviewScroll.ChangeView(0, 0, 1, true);
+        PaintRegions();
+        if (focus == Area.Full) return;
+
+        PreviewScroll.UpdateLayout();
+        var x = (focus.X + focus.Width / 2) * SheetExtent.Width - PreviewScroll.ViewportWidth / 2;
+        var y = (focus.Y + focus.Height / 2) * SheetExtent.Height - PreviewScroll.ViewportHeight / 2;
+        PreviewScroll.ChangeView(Math.Clamp(x, 0, PreviewScroll.ScrollableWidth),
+            Math.Clamp(y, 0, PreviewScroll.ScrollableHeight), null, true);
     }
 
     private void ToggleRegions(object sender, RoutedEventArgs e)
