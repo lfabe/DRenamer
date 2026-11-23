@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.Core;
 
 namespace DrawingRenamer;
 
@@ -45,25 +46,25 @@ public sealed class DrawingAnalyzer
             using var input = File.OpenRead(path);
             sourceHash = RenameService.Hash(input);
             input.Position = 0;
-            using var document = PdfDocument.Open(input);
-            pages = document.NumberOfPages;
+            using var document = OpenTextDocument(input, options.OcrEnabled);
+            pages = document?.NumberOfPages ?? renderer.CountPages(input, token);
             for (var number = 1; number <= pages; number++)
             {
                 token.ThrowIfCancellationRequested();
                 try
                 {
-                    var page = document.GetPage(number);
-                    var sheet = new PdfSheet(page);
-                    var lines = sheet.Lines(token);
-                    var found = Find(lines, page.Width, page.Height, templates, token).ToList();
+                    var page = document?.GetPage(number);
+                    var sheet = page is null ? null : new PdfSheet(page);
+                    var (width, height) = page is null ? renderer.PageSize(input, number, token) : (page.Width, page.Height);
+                    var found = Find(sheet?.Lines(token) ?? [], width, height, templates, token).ToList();
                     Raster? scan = null;
                     ScanTitle[]? fittedScans = null;
                     if (found.Count == 0 && options.OcrEnabled)
                     {
                         var raster = renderer.Render(path, number, Area.Full, 2300, token);
                         var rasterLines = raster.FindLines(Area.Full, token).ToArray();
-                        found.AddRange(Find(rasterLines, page.Width, page.Height, templates, token));
-                        if (page.NumberOfImages > 0) scan = raster;
+                        found.AddRange(Find(rasterLines, width, height, templates, token));
+                        if (page is null || page.NumberOfImages > 0) scan = raster;
                     }
                     if (found.FirstOrDefault(title => title.IsContinuation) is { } continuation)
                     {
@@ -82,7 +83,7 @@ public sealed class DrawingAnalyzer
                         for (var turn = 0; turn < 4; turn++)
                         foreach (var template in templates)
                         {
-                            var (w, h) = (turn & 1) == 0 ? (page.Width, page.Height) : (page.Height, page.Width);
+                            var (w, h) = (turn & 1) == 0 ? (width, height) : (height, width);
                             if (TitleLocator.Guess(template, w, h, turn) is { } guess) found.Add(guess);
                         }
                     }
@@ -111,7 +112,7 @@ public sealed class DrawingAnalyzer
                             var recognized = ReadOcr(path, candidate, ocr, token);
                             if (scan is not null && candidate.Name.Length == 0 && recognized.OcrConfidence < .92)
                             {
-                                fittedScans ??= ScanTitleLocator.Find(scan, page.Width, page.Height, templates,
+                                fittedScans ??= ScanTitleLocator.Find(scan, width, height, templates,
                                     turn => renderer.Render(path, number, Area.Full, 2300, token, turn), token).ToArray();
                                 var fitted = fittedScans.FirstOrDefault(s => s.Turn == location.Turn && s.Template == location.Template &&
                                     s.Regions.TitleBlock is { } block && TitleLocator.SameFrame(block, location.PageFrame));
@@ -135,7 +136,7 @@ public sealed class DrawingAnalyzer
                     if (scan is not null)
                     {
                         var fittedMatches = new List<Candidate>();
-                        foreach (var stamp in (fittedScans ?? ScanTitleLocator.Find(scan, page.Width, page.Height, templates,
+                        foreach (var stamp in (fittedScans ?? ScanTitleLocator.Find(scan, width, height, templates,
                             turn => renderer.Render(path, number, Area.Full, 2300, token, turn), token))
                             .DistinctBy(s => (s.Regions, s.Turn, s.Slope)))
                         {
@@ -225,9 +226,11 @@ public sealed class DrawingAnalyzer
         token.ThrowIfCancellationRequested();
         if (!regions.Designation.IsValid || !regions.Name.IsValid)
             throw new ArgumentException("Укажите обе графы.", nameof(regions));
-        using var document = PdfDocument.Open(path);
+        using var input = File.OpenRead(path);
+        using var document = OpenTextDocument(input, options.OcrEnabled);
         var ocr = new PpOcrReader(options.Languages);
-        var candidate = ReadText(new(document.GetPage(page)), page, regions, turn, false);
+        var sheet = document is null ? null : new PdfSheet(document.GetPage(page));
+        var candidate = ReadText(sheet, page, regions, turn, false);
         return HasBothFields(candidate) || !options.OcrEnabled ? candidate :
             CorrectAssemblySuffix(ReadOcr(path, candidate, ocr, token));
     }
@@ -238,10 +241,12 @@ public sealed class DrawingAnalyzer
         token.ThrowIfCancellationRequested();
         if (!regions.Designation.IsValid || !regions.Name.IsValid)
             throw new ArgumentException("Укажите обе графы.", nameof(regions));
-        using var document = PdfDocument.Open(path);
-        var page = document.GetPage(number);
-        var (width, height) = (turn & 1) == 0 ? (page.Width, page.Height) : (page.Height, page.Width);
-        var lines = new PdfSheet(page).Lines(token);
+        using var input = File.OpenRead(path);
+        using var document = OpenTextDocument(input, options.OcrEnabled);
+        var page = document?.GetPage(number);
+        var (pageWidth, pageHeight) = page is null ? renderer.PageSize(input, number, token) : (page.Width, page.Height);
+        var (width, height) = (turn & 1) == 0 ? (pageWidth, pageHeight) : (pageHeight, pageWidth);
+        var lines = page is null ? [] : new PdfSheet(page).Lines(token);
         var template = Create(lines);
         if (template is null && options.OcrEnabled)
         {
@@ -281,10 +286,16 @@ public sealed class DrawingAnalyzer
         }
     }
 
-    private static Candidate ReadText(PdfSheet sheet, int page, FieldRegions regions, int turn, bool verified)
+    private static PdfDocument? OpenTextDocument(Stream input, bool ocrEnabled)
     {
-        var designation = NormalizeDesignation(sheet.Read(regions.Designation, turn));
-        var name = regions.Name.IsValid ? NormalizeName(sheet.Read(regions.Name, turn)) : "";
+        try { return PdfDocument.Open(input); }
+        catch (PdfDocumentFormatException) when (ocrEnabled) { return null; }
+    }
+
+    private static Candidate ReadText(PdfSheet? sheet, int page, FieldRegions regions, int turn, bool verified)
+    {
+        var designation = sheet is null ? "" : NormalizeDesignation(sheet.Read(regions.Designation, turn));
+        var name = sheet is not null && regions.Name.IsValid ? NormalizeName(sheet.Read(regions.Name, turn)) : "";
         return new(designation, name, page, turn, regions, "PDF", Verified: verified);
     }
 
@@ -373,10 +384,15 @@ public sealed class DrawingAnalyzer
     public static string NormalizeName(string value) => Regex.Replace(value.Normalize(NormalizationForm.FormC),
         @"\s+", " ").Trim();
 
-    internal static string NormalizeOcrName(string value) =>
-        Regex.Replace(NormalizeName(value), @"\bсдорочн(?:ый|ая|ое|ые)\b",
+    internal static string NormalizeOcrName(string value)
+    {
+        var corrected = Regex.Replace(NormalizeName(value), @"\bсдорочн(?:ый|ая|ое|ые)\b",
             match => match.Value[..1] + (char.IsUpper(match.Value[1]) ? "Б" : "б") + match.Value[2..],
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        corrected = Regex.Replace(corrected, @"(?<=\bсхема комбиниров)с(?=нная принципиальная\b)",
+            match => char.IsUpper(match.Value[0]) ? "А" : "а", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return Regex.Replace(corrected, @"\s*№(?:\s*[°º])?\s*(?=[0-9])", " № ").Trim();
+    }
 
     internal static Candidate CorrectAssemblySuffix(Candidate candidate)
     {

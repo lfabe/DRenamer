@@ -11,6 +11,9 @@ public sealed partial class MainViewModel : ObservableObject
         this.settingsPath = settingsPath ?? Path.Combine(DataFolder, "settings.json");
     [ObservableProperty] public partial int ThemeIndex { get; set; }
     [ObservableProperty] public partial string SettingsMessage { get; set; } = "";
+    [ObservableProperty] public partial bool ScannerWatchEnabled { get; set; }
+    public bool HasScannerFolder => scannerInbox is not null;
+    public string ScannerFolderLabel => scannerInbox?.Folder ?? "Папка не выбрана";
     public int LanguageIndex
     {
         get => Languages switch { "eng" => 2, "rus+eng" => 1, _ => 0 };
@@ -26,7 +29,8 @@ public sealed partial class MainViewModel : ObservableObject
         }
         return WorkAsync(async () =>
         {
-            var settings = new AppSettings(ThemeIndex, SeparatorInput, OcrEnabled, Languages, TemplatePath);
+            var settings = new AppSettings(ThemeIndex, SeparatorInput, OcrEnabled, Languages, TemplatePath,
+                scannerInbox?.Folder, ScannerWatchEnabled);
             if (await SaveSettingsFileAsync(settings)) ReportSettings("Настройки сохранены.");
         });
     }
@@ -68,6 +72,8 @@ public sealed partial class MainViewModel : ObservableObject
         OcrEnabled = settings.OcrEnabled;
         Languages = settings.Languages;
         SetTemplates(null);
+        SetScannerFolder(settings.ScannerFolder);
+        ScannerWatchEnabled = HasScannerFolder && settings.ScannerWatchEnabled;
     }
 
     private async Task<bool> SaveSettingsFileAsync(AppSettings settings)
@@ -92,14 +98,17 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly HashSet<string> folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> individualFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> excludedFiles = new(StringComparer.OrdinalIgnoreCase);
+    private ScannerInbox? scannerInbox;
+    private bool checkingScanner;
     private CancellationTokenSource? cancellation;
     private string separator = "_";
     private static readonly string DataFolder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DrawingRenamer");
-    public RenameService Renamer { get; } = new(Path.Combine(DataFolder, "history.json"));
+    public RenameService Renamer { get; internal init; } = new(Path.Combine(DataFolder, "history.json"));
     public ObservableCollection<DocumentRow> Rows { get; } = [];
     public bool HasDocumentSources => folders.Count > 0 || individualFiles.Count > 0;
     public bool CanUndo { get; private set; }
+    public bool IsAnalyzing => cancellation is not null;
 
     [ObservableProperty] public partial DocumentRow? Selected { get; set; }
     [ObservableProperty] public partial bool Busy { get; set; }
@@ -173,19 +182,68 @@ public sealed partial class MainViewModel : ObservableObject
         return Task.CompletedTask;
     }
 
-    public void RemoveDocument(DocumentRow row)
+    public void SetScannerFolder(string? path)
+    {
+        if (!Path.IsPathFullyQualified(path ?? "")) path = null;
+        if (string.Equals(scannerInbox?.Folder, path, StringComparison.OrdinalIgnoreCase)) return;
+        scannerInbox = path is null ? null : new(path);
+        SettingsMessage = "";
+        OnPropertyChanged(nameof(HasScannerFolder));
+        OnPropertyChanged(nameof(ScannerFolderLabel));
+    }
+
+    internal async Task CheckScannerFolderAsync(Func<bool> canStart)
+    {
+        if (checkingScanner || scannerInbox is not { } inbox || !CanScan()) return;
+        checkingScanner = true;
+        try
+        {
+            var ignored = Rows.Where(row => !IsPending(row)).Select(row => row.Source)
+                .Concat(excludedFiles).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var paths = await Task.Run(() => inbox.FindReadyFiles(ignored));
+            if (!CanScan() || scannerInbox != inbox || paths.Length == 0) return;
+
+            var ready = paths.Where(path => !excludedFiles.Contains(path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            AddRows(ready);
+            var batch = Rows.Where(row => ready.Contains(row.Source) && IsPending(row)).ToArray();
+            individualFiles.UnionWith(batch.Select(row => row.Source));
+            await AnalyzeRowsAsync(batch, force: false, requireReview: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            if (CanScan() && scannerInbox == inbox) Message = "Папка сканера недоступна. Ожидание подключения…";
+        }
+        finally { checkingScanner = false; }
+
+        bool CanScan() => ScannerWatchEnabled && OcrEnabled && !Busy && canStart();
+        static bool IsPending(DocumentRow row) => row.Included && row.Status == "В очереди";
+    }
+
+    public void RemoveDocuments(IEnumerable<DocumentRow> selection)
     {
         if (Busy) return;
-        var index = Rows.IndexOf(row);
-        if (index < 0) return;
+        var targets = selection.ToHashSet();
+        var active = Selected;
+        var activeIndex = active is null ? -1 : Rows.IndexOf(active);
+        var nextIndex = activeIndex;
+        DocumentRow? removed = null;
+        var count = 0;
+        for (var index = Rows.Count - 1; index >= 0; index--)
+        {
+            var row = Rows[index];
+            if (!targets.Contains(row)) continue;
+            if (index < activeIndex) nextIndex--;
+            individualFiles.Remove(row.Source);
+            excludedFiles.Add(row.Source);
+            Rows.RemoveAt(index);
+            removed = row;
+            count++;
+        }
 
-        var wasSelected = Selected == row;
-        individualFiles.Remove(row.Source);
-        excludedFiles.Add(row.Source);
-        Rows.RemoveAt(index);
-        if (wasSelected)
-            Selected = Rows.Count == 0 ? null : Rows[Math.Min(index, Rows.Count - 1)];
-        Message = $"Удалено из списка: {row.OriginalName}.";
+        if (removed is null) return;
+        if (activeIndex >= 0 && active is not null && targets.Contains(active))
+            Selected = Rows.Count == 0 ? null : Rows[Math.Min(nextIndex, Rows.Count - 1)];
+        Message = count == 1 ? $"Удалено из списка: {removed.OriginalName}." : $"Удалено из списка: {count}.";
     }
 
     private int AddRows(IEnumerable<string> paths)
@@ -251,7 +309,7 @@ public sealed partial class MainViewModel : ObservableObject
     public Task AnalyzeDocumentAsync(DocumentRow row) => Rows.Contains(row)
         ? AnalyzeRowsAsync([row], true) : Task.CompletedTask;
 
-    private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force)
+    private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force, bool requireReview = false)
     {
         if (Busy || batch.Length == 0) return;
         using var operation = new CancellationTokenSource();
@@ -281,6 +339,8 @@ public sealed partial class MainViewModel : ObservableObject
                     }
                     Message = $"Анализ {index + 1} из {batch.Length} · {row.OriginalName}";
                     var result = await Task.Run(() => analyzer.Analyze(row.Source, options, operation.Token));
+                    if (requireReview && result.Status == RecognitionStatus.Ready)
+                        result = result with { Status = RecognitionStatus.Review, Diagnostic = "Проверьте обе графы и подтвердите значения." };
                     row.Apply(result);
                     processed++;
                     Progress = 100d * (index + 1) / batch.Length;

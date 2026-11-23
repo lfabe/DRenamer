@@ -31,6 +31,177 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public void UnreadableMetadataFallsBackToRecognitionOfTheRenderedPage()
+    {
+        var path = WritePdf(metadataAsStream: true, Sheet(595, 842, 0));
+        var analyzer = new DrawingAnalyzer();
+        Assert.Equal(RecognitionStatus.Error, analyzer.Analyze(path, new(OcrEnabled: false), default).Status);
+
+        var options = new RecognitionOptions(Languages: "eng");
+        var result = analyzer.Analyze(path, options, default);
+        Assert.Equal(1, result.PageCount);
+        Assert.Equal(RecognitionStatus.Review, result.Status);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal("ABCD.123456.001", candidate.Designation);
+        Assert.Equal("MAIN HOUSING", candidate.Name, ignoreCase: true);
+        var manual = analyzer.ReadRegions(path, 1, candidate.Regions, candidate.Turn, options, default);
+        Assert.Equal(candidate.Designation, manual.Designation);
+        Assert.Equal(candidate.Name, manual.Name, ignoreCase: true);
+    }
+
+    [Fact]
+    public async Task ScannerWaitsForTheWriterAndRequiresOperatorConfirmation()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var path = Path.Combine(inbox, "incoming.pdf");
+        var bytes = File.ReadAllBytes(Pdf(Sheet(595, 842, 0)));
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"));
+        model.SetScannerFolder(inbox);
+        using (var writer = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite))
+        {
+            writer.Write(bytes[..32]);
+            writer.Flush();
+            await model.CheckScannerFolderAsync(() => true);
+            Assert.Empty(model.Rows);
+
+            model.ScannerWatchEnabled = true;
+            await model.CheckScannerFolderAsync(() => true);
+            await model.CheckScannerFolderAsync(() => true);
+            Assert.Empty(model.Rows);
+            writer.Write(bytes[32..]);
+        }
+
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Empty(model.Rows);
+        await model.CheckScannerFolderAsync(() => true);
+        var row = Assert.Single(model.Rows);
+        Assert.Equal("ABCD.123456.001", row.Designation);
+        Assert.Equal("MAIN HOUSING", row.DocumentName);
+        Assert.Equal("Проверить", row.Status);
+        Assert.False(row.Confirmed);
+        await model.ConfirmAsync(row);
+        Assert.True(row.Confirmed);
+    }
+
+    [Fact]
+    public async Task ScannerProcessesArrivalsAfterReenablingAndRespectsRemoval()
+    {
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"));
+        model.SetScannerFolder(folder);
+        var path = Path.Combine(folder, "new.pdf");
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "scan-form1.pdf"), path);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Empty(model.Rows);
+
+        model.ScannerWatchEnabled = true;
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => false);
+        Assert.Empty(model.Rows);
+        await model.CheckScannerFolderAsync(() => true);
+        var row = Assert.Single(model.Rows);
+        Assert.Equal("АБВГ.123456.001", row.Designation);
+        Assert.Equal("Проверить", row.Status);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Same(row, Assert.Single(model.Rows));
+
+        model.RemoveDocuments([row]);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Empty(model.Rows);
+        Assert.True(File.Exists(path));
+    }
+
+    [Fact]
+    public async Task ScannerRecognizesASecondFileWithTheSameNameAfterRenaming()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var path = Path.Combine(inbox, "incoming.pdf");
+        File.Copy(Pdf(Sheet(595, 842, 0)), path);
+        var lastWrite = File.GetLastWriteTimeUtc(path);
+        var model = new MainViewModel { ScannerWatchEnabled = true, Renamer = new(Path.Combine(folder, "history.json")) };
+        model.SetScannerFolder(inbox);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        var first = Assert.Single(model.Rows);
+        Assert.Equal("ABCD.123456.001", first.Designation);
+        await model.ConfirmAsync(first);
+        await model.MoveAsync([first.Request]);
+        Assert.Equal("Переименован", first.Status);
+        Assert.False(File.Exists(path));
+        Assert.True(File.Exists(first.Source));
+
+        File.Copy(Pdf(Sheet(595, 842, 0, "ABCD.123456.002")), path);
+        File.SetLastWriteTimeUtc(path, lastWrite);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Single(model.Rows);
+        await model.CheckScannerFolderAsync(() => true);
+        var second = Assert.Single(model.Rows, row => row.Source == path);
+        Assert.Equal("ABCD.123456.002", second.Designation);
+        Assert.Equal("Проверить", second.Status);
+        Assert.Equal("Переименован", first.Status);
+    }
+
+    [Fact]
+    public async Task ScannerRetriesQueuedPdfAfterMissingTemplateIsReset()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        File.Copy(Pdf(Sheet(595, 842, 0)), Path.Combine(inbox, "incoming.pdf"));
+        var model = new MainViewModel { ScannerWatchEnabled = true };
+        model.SetScannerFolder(inbox);
+        var templates = Path.Combine(folder, "templates.json");
+        TitleTemplate.Defaults[0].Save(templates, newFile: true);
+        model.SetTemplates(templates);
+        File.Delete(templates);
+
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        var row = Assert.Single(model.Rows);
+        Assert.Equal("В очереди", row.Status);
+        Assert.Null(row.Result);
+        Assert.Contains("не удалось загрузить выбранный JSON", model.Message, StringComparison.OrdinalIgnoreCase);
+
+        model.SetTemplates(null);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Same(row, Assert.Single(model.Rows));
+        Assert.Equal("ABCD.123456.001", row.Designation);
+        Assert.Equal("Проверить", row.Status);
+    }
+
+    [Fact]
+    public async Task ScannerRetriesOnlyUnfinishedFilesAfterCancellation()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var firstPath = Path.Combine(inbox, "a.pdf");
+        var secondPath = Path.Combine(inbox, "b.pdf");
+        File.Copy(Pdf(Sheet(595, 842, 0)), firstPath);
+        File.Copy(Pdf(Sheet(595, 842, 0, "ABCD.123456.002")), secondPath);
+        var model = new MainViewModel { ScannerWatchEnabled = true };
+        model.SetScannerFolder(inbox);
+        model.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(model.Progress) && model.Progress == 50)
+                model.CancelCommand.Execute(null);
+        };
+
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        var first = Assert.Single(model.Rows, row => row.Source == firstPath);
+        var completed = Assert.IsType<RecognitionResult>(first.Result);
+        var second = Assert.Single(model.Rows, row => row.Source == secondPath);
+        Assert.Equal("В очереди", second.Status);
+        Assert.Null(second.Result);
+        Assert.Contains("Анализ отменён", model.Message);
+
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Same(completed, first.Result);
+        Assert.Equal("ABCD.123456.002", second.Designation);
+        Assert.Equal("Проверить", second.Status);
+    }
+
+    [Fact]
     public void LaterTitleSheetsAreFoundAndDifferentPairsRequireReview()
     {
         var analyzer = new DrawingAnalyzer();
@@ -651,7 +822,13 @@ public sealed class RecognitionTests : IDisposable
     [InlineData("сдорочная единица", "сборочная единица")]
     [InlineData("СДОРОЧНЫЙ ЧЕРТЁЖ", "СБОРОЧНЫЙ ЧЕРТЁЖ")]
     [InlineData("Сварочный узел", "Сварочный узел")]
-    public void OcrNameCorrectsAssemblyWordWithoutChangingCase(string source, string expected)
+    [InlineData("Установка Схема комбинировснная принципиальная", "Установка Схема комбинированная принципиальная")]
+    [InlineData("СХЕМА КОМБИНИРОВСННАЯ ПРИНЦИПИАЛЬНАЯ", "СХЕМА КОМБИНИРОВАННАЯ ПРИНЦИПИАЛЬНАЯ")]
+    [InlineData("Рама№1", "Рама № 1")]
+    [InlineData("Рама № 2", "Рама № 2")]
+    [InlineData("Рама №°3", "Рама № 3")]
+    [InlineData("№1", "№ 1")]
+    public void OcrNameCorrectsRecognizedTextWithoutChangingPdfText(string source, string expected)
     {
         Assert.Equal(expected, DrawingAnalyzer.NormalizeOcrName(source));
         Assert.Equal(source, DrawingAnalyzer.NormalizeName(source));
@@ -726,7 +903,9 @@ public sealed class RecognitionTests : IDisposable
             """));
     }
 
-    private string Pdf(params Page[] pages)
+    private string Pdf(params Page[] pages) => WritePdf(false, pages);
+
+    private string WritePdf(bool metadataAsStream, params Page[] pages)
     {
         var objects = new List<string>
         {
@@ -739,6 +918,8 @@ public sealed class RecognitionTests : IDisposable
             objects.Add($"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page.Width} {page.Height}] /Rotate {page.Rotation} /Resources << /Font << /F1 3 0 R >> >> /Contents {objects.Count + 2} 0 R >>");
             objects.Add($"<< /Length {page.Content.Length} >>\nstream\n{page.Content}\nendstream");
         }
+        if (metadataAsStream) objects.Add("<< /Length 3 >>\nstream\nabc\nendstream");
+        var info = metadataAsStream ? $" /Info {objects.Count} 0 R" : "";
         var pdf = new StringBuilder("%PDF-1.4\n");
         var offsets = new List<int>();
         foreach (var obj in objects)
@@ -750,7 +931,7 @@ public sealed class RecognitionTests : IDisposable
         pdf.Append($"xref\n0 {objects.Count + 1}\n0000000000 65535 f \n");
         foreach (var offset in offsets)
             pdf.Append($"{offset:D10} 00000 n \n");
-        pdf.Append($"trailer\n<< /Size {objects.Count + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+        pdf.Append($"trailer\n<< /Size {objects.Count + 1} /Root 1 0 R{info} >>\nstartxref\n{xref}\n%%EOF\n");
         var path = Path.Combine(folder, Guid.NewGuid() + ".pdf");
         File.WriteAllText(path, pdf.ToString(), Encoding.ASCII);
         return path;

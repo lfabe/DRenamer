@@ -152,6 +152,29 @@ public sealed class DocumentWorkflowTests : IDisposable
     }
 
     [Fact]
+    public async Task RemovesAllSelectedRowsAndKeepsTheirPdfFiles()
+    {
+        var model = new MainViewModel();
+        var paths = Enumerable.Range(1, 5).Select(i => Path.Combine(folder, $"leaf-{i}.pdf")).ToArray();
+        foreach (var path in paths) File.WriteAllText(path, "%PDF-original");
+        await model.AddDocumentsAsync(paths);
+        var rows = model.Rows.ToArray();
+        rows[0].Included = false;
+        model.Selected = rows[2];
+
+        model.RemoveDocuments(model.Rows.Where(row => row == rows[0] || row == rows[2]).Append(rows[0]));
+
+        Assert.Equal(new[] { rows[1], rows[3], rows[4] }, model.Rows);
+        Assert.Same(rows[3], model.Selected);
+        Assert.Equal("Удалено из списка: 2.", model.Message);
+        model.RemoveDocuments(model.Rows);
+        Assert.Empty(model.Rows);
+        Assert.Null(model.Selected);
+        Assert.False(model.HasDocumentSources);
+        Assert.All(paths, path => Assert.True(File.Exists(path)));
+    }
+
+    [Fact]
     public void SelectingRecognitionOrientsThePreviewAndRenameRequest()
     {
         var row = ConfirmedRow("rotated.pdf");

@@ -152,12 +152,14 @@ public sealed class RenameTests : IDisposable
         Assert.Contains("«Обозначение» — строчные буквы", designationError);
     }
 
-    [Fact]
-    public void AllowsUnderscoresInTheTitleOnly()
+    [Theory]
+    [InlineData("ПРОКЛАДКА_01", "_")]
+    [InlineData("РАМА № 2", "№")]
+    public void AllowsUnderscoreAndNumeroSignInTheTitleOnly(string value, string symbol)
     {
-        Assert.Equal("AB_Прокладка_01.pdf", RenameService.FileName("AB", "Прокладка_01"));
-        Assert.Null(RenameService.FileName("AB_01", "PART", out var error));
-        Assert.Contains("«Обозначение»", error);
+        Assert.Equal($"AB_{value}.pdf", RenameService.FileName("AB", value));
+        Assert.Null(RenameService.FileName(value, "PART", out var error));
+        Assert.Contains($"«Обозначение» — «{symbol}»", error);
     }
 
     [Theory]
