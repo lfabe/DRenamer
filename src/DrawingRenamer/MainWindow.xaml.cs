@@ -335,12 +335,7 @@ public sealed partial class MainWindow : Window
             {
                 using var input = File.OpenRead(path);
                 var hash = RenameService.Hash(input);
-                var count = knownCount.GetValueOrDefault();
-                if (count < 1)
-                {
-                    using var document = UglyToad.PdfPig.PdfDocument.Open(path);
-                    count = document.NumberOfPages;
-                }
+                var count = knownCount is > 0 ? knownCount.Value : renderer.CountPages(input, operation.Token);
                 return (count, hash, raster: renderer.Render(path, number, Area.Full, 1800, operation.Token));
             });
             operation.Token.ThrowIfCancellationRequested();

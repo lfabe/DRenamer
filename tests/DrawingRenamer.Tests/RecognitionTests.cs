@@ -31,6 +31,25 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public void UnreadableMetadataFallsBackToRecognitionOfTheRenderedPage()
+    {
+        var path = WritePdf(metadataAsStream: true, Sheet(595, 842, 0));
+        var analyzer = new DrawingAnalyzer();
+        Assert.Equal(RecognitionStatus.Error, analyzer.Analyze(path, new(OcrEnabled: false), default).Status);
+
+        var options = new RecognitionOptions(Languages: "eng");
+        var result = analyzer.Analyze(path, options, default);
+        Assert.Equal(1, result.PageCount);
+        Assert.Equal(RecognitionStatus.Review, result.Status);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal("ABCD.123456.001", candidate.Designation);
+        Assert.Equal("MAIN HOUSING", candidate.Name, ignoreCase: true);
+        var manual = analyzer.ReadRegions(path, 1, candidate.Regions, candidate.Turn, options, default);
+        Assert.Equal(candidate.Designation, manual.Designation);
+        Assert.Equal(candidate.Name, manual.Name, ignoreCase: true);
+    }
+
+    [Fact]
     public void LaterTitleSheetsAreFoundAndDifferentPairsRequireReview()
     {
         var analyzer = new DrawingAnalyzer();
@@ -651,8 +670,11 @@ public sealed class RecognitionTests : IDisposable
     [InlineData("сдорочная единица", "сборочная единица")]
     [InlineData("СДОРОЧНЫЙ ЧЕРТЁЖ", "СБОРОЧНЫЙ ЧЕРТЁЖ")]
     [InlineData("Сварочный узел", "Сварочный узел")]
+    [InlineData("Установка Схема комбинировснная принципиальная", "Установка Схема комбинированная принципиальная")]
+    [InlineData("СХЕМА КОМБИНИРОВСННАЯ ПРИНЦИПИАЛЬНАЯ", "СХЕМА КОМБИНИРОВАННАЯ ПРИНЦИПИАЛЬНАЯ")]
     [InlineData("Рама№1", "Рама № 1")]
     [InlineData("Рама № 2", "Рама № 2")]
+    [InlineData("Рама №°3", "Рама № 3")]
     [InlineData("№1", "№ 1")]
     public void OcrNameCorrectsRecognizedTextWithoutChangingPdfText(string source, string expected)
     {
@@ -729,7 +751,9 @@ public sealed class RecognitionTests : IDisposable
             """));
     }
 
-    private string Pdf(params Page[] pages)
+    private string Pdf(params Page[] pages) => WritePdf(false, pages);
+
+    private string WritePdf(bool metadataAsStream, params Page[] pages)
     {
         var objects = new List<string>
         {
@@ -742,6 +766,8 @@ public sealed class RecognitionTests : IDisposable
             objects.Add($"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page.Width} {page.Height}] /Rotate {page.Rotation} /Resources << /Font << /F1 3 0 R >> >> /Contents {objects.Count + 2} 0 R >>");
             objects.Add($"<< /Length {page.Content.Length} >>\nstream\n{page.Content}\nendstream");
         }
+        if (metadataAsStream) objects.Add("<< /Length 3 >>\nstream\nabc\nendstream");
+        var info = metadataAsStream ? $" /Info {objects.Count} 0 R" : "";
         var pdf = new StringBuilder("%PDF-1.4\n");
         var offsets = new List<int>();
         foreach (var obj in objects)
@@ -753,7 +779,7 @@ public sealed class RecognitionTests : IDisposable
         pdf.Append($"xref\n0 {objects.Count + 1}\n0000000000 65535 f \n");
         foreach (var offset in offsets)
             pdf.Append($"{offset:D10} 00000 n \n");
-        pdf.Append($"trailer\n<< /Size {objects.Count + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+        pdf.Append($"trailer\n<< /Size {objects.Count + 1} /Root 1 0 R{info} >>\nstartxref\n{xref}\n%%EOF\n");
         var path = Path.Combine(folder, Guid.NewGuid() + ".pdf");
         File.WriteAllText(path, pdf.ToString(), Encoding.ASCII);
         return path;

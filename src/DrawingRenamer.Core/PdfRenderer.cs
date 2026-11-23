@@ -113,6 +113,18 @@ public sealed class PdfRenderer
 {
     private static readonly object Gate = new();
 
+    public int CountPages(Stream input, CancellationToken token) =>
+        WithDocument(input, Native.FPDF_GetPageCount, token);
+
+    internal (double Width, double Height) PageSize(Stream input, int number, CancellationToken token) =>
+        WithDocument<(double, double)>(input, document =>
+        {
+            var page = Native.FPDF_LoadPage(document, number - 1);
+            if (page == IntPtr.Zero) throw new InvalidDataException("Не удалось открыть страницу PDF.");
+            try { return (Native.FPDF_GetPageWidthF(page), Native.FPDF_GetPageHeightF(page)); }
+            finally { Native.FPDF_ClosePage(page); }
+        }, token);
+
     public Raster Render(string path, int number, Area crop, int maxEdge, CancellationToken token) =>
         Render(path, number, crop, maxEdge, token, 0);
 
