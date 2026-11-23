@@ -173,19 +173,31 @@ public sealed partial class MainViewModel : ObservableObject
         return Task.CompletedTask;
     }
 
-    public void RemoveDocument(DocumentRow row)
+    public void RemoveDocuments(IEnumerable<DocumentRow> selection)
     {
         if (Busy) return;
-        var index = Rows.IndexOf(row);
-        if (index < 0) return;
+        var targets = selection.ToHashSet();
+        var active = Selected;
+        var activeIndex = active is null ? -1 : Rows.IndexOf(active);
+        var nextIndex = activeIndex;
+        DocumentRow? removed = null;
+        var count = 0;
+        for (var index = Rows.Count - 1; index >= 0; index--)
+        {
+            var row = Rows[index];
+            if (!targets.Contains(row)) continue;
+            if (index < activeIndex) nextIndex--;
+            individualFiles.Remove(row.Source);
+            excludedFiles.Add(row.Source);
+            Rows.RemoveAt(index);
+            removed = row;
+            count++;
+        }
 
-        var wasSelected = Selected == row;
-        individualFiles.Remove(row.Source);
-        excludedFiles.Add(row.Source);
-        Rows.RemoveAt(index);
-        if (wasSelected)
-            Selected = Rows.Count == 0 ? null : Rows[Math.Min(index, Rows.Count - 1)];
-        Message = $"Удалено из списка: {row.OriginalName}.";
+        if (removed is null) return;
+        if (activeIndex >= 0 && active is not null && targets.Contains(active))
+            Selected = Rows.Count == 0 ? null : Rows[Math.Min(nextIndex, Rows.Count - 1)];
+        Message = count == 1 ? $"Удалено из списка: {removed.OriginalName}." : $"Удалено из списка: {count}.";
     }
 
     private int AddRows(IEnumerable<string> paths)

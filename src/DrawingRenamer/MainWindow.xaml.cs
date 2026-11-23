@@ -241,15 +241,16 @@ public sealed partial class MainWindow : Window
     private void RemoveDocumentFromMenu(object sender, RoutedEventArgs e)
     {
         if (CanChangeDocuments && sender is MenuFlyoutItem { Tag: DocumentRow row })
-            ViewModel.RemoveDocument(row);
+            ViewModel.RemoveDocuments(Documents.SelectedItems.Contains(row)
+                ? Documents.SelectedItems.OfType<DocumentRow>() : [row]);
     }
 
     private void DocumentsKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key != Windows.System.VirtualKey.Delete || !CanChangeDocuments ||
-            Documents.SelectedItem is not DocumentRow row) return;
+            Documents.SelectedItems.Count == 0) return;
         e.Handled = true;
-        ViewModel.RemoveDocument(row);
+        ViewModel.RemoveDocuments(Documents.SelectedItems.OfType<DocumentRow>());
         Documents.Focus(FocusState.Keyboard);
     }
 
