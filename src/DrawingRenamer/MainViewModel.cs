@@ -98,14 +98,13 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly HashSet<string> folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> individualFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> excludedFiles = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> submittedScans = new(StringComparer.OrdinalIgnoreCase);
     private ScannerInbox? scannerInbox;
     private bool checkingScanner;
     private CancellationTokenSource? cancellation;
     private string separator = "_";
     private static readonly string DataFolder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DrawingRenamer");
-    public RenameService Renamer { get; } = new(Path.Combine(DataFolder, "history.json"));
+    public RenameService Renamer { get; internal init; } = new(Path.Combine(DataFolder, "history.json"));
     public ObservableCollection<DocumentRow> Rows { get; } = [];
     public bool HasDocumentSources => folders.Count > 0 || individualFiles.Count > 0;
     public bool CanUndo { get; private set; }
@@ -188,7 +187,6 @@ public sealed partial class MainViewModel : ObservableObject
         if (!Path.IsPathFullyQualified(path ?? "")) path = null;
         if (string.Equals(scannerInbox?.Folder, path, StringComparison.OrdinalIgnoreCase)) return;
         scannerInbox = path is null ? null : new(path);
-        submittedScans.Clear();
         SettingsMessage = "";
         OnPropertyChanged(nameof(HasScannerFolder));
         OnPropertyChanged(nameof(ScannerFolderLabel));
@@ -201,18 +199,14 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             var ignored = Rows.Where(row => !IsPending(row)).Select(row => row.Source)
-                .Concat(excludedFiles).Concat(submittedScans).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                .Concat(excludedFiles).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var paths = await Task.Run(() => inbox.FindReadyFiles(ignored));
             if (!CanScan() || scannerInbox != inbox || paths.Length == 0) return;
 
             var ready = paths.Where(path => !excludedFiles.Contains(path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
             AddRows(ready);
             var batch = Rows.Where(row => ready.Contains(row.Source) && IsPending(row)).ToArray();
-            foreach (var row in batch)
-            {
-                individualFiles.Add(row.Source);
-                submittedScans.Add(row.Source);
-            }
+            individualFiles.UnionWith(batch.Select(row => row.Source));
             await AnalyzeRowsAsync(batch, force: false, requireReview: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)

@@ -113,6 +113,95 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public async Task ScannerRecognizesASecondFileWithTheSameNameAfterRenaming()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var path = Path.Combine(inbox, "incoming.pdf");
+        File.Copy(Pdf(Sheet(595, 842, 0)), path);
+        var lastWrite = File.GetLastWriteTimeUtc(path);
+        var model = new MainViewModel { ScannerWatchEnabled = true, Renamer = new(Path.Combine(folder, "history.json")) };
+        model.SetScannerFolder(inbox);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        var first = Assert.Single(model.Rows);
+        Assert.Equal("ABCD.123456.001", first.Designation);
+        await model.ConfirmAsync(first);
+        await model.MoveAsync([first.Request]);
+        Assert.Equal("Переименован", first.Status);
+        Assert.False(File.Exists(path));
+        Assert.True(File.Exists(first.Source));
+
+        File.Copy(Pdf(Sheet(595, 842, 0, "ABCD.123456.002")), path);
+        File.SetLastWriteTimeUtc(path, lastWrite);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Single(model.Rows);
+        await model.CheckScannerFolderAsync(() => true);
+        var second = Assert.Single(model.Rows, row => row.Source == path);
+        Assert.Equal("ABCD.123456.002", second.Designation);
+        Assert.Equal("Проверить", second.Status);
+        Assert.Equal("Переименован", first.Status);
+    }
+
+    [Fact]
+    public async Task ScannerRetriesQueuedPdfAfterMissingTemplateIsReset()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        File.Copy(Pdf(Sheet(595, 842, 0)), Path.Combine(inbox, "incoming.pdf"));
+        var model = new MainViewModel { ScannerWatchEnabled = true };
+        model.SetScannerFolder(inbox);
+        var templates = Path.Combine(folder, "templates.json");
+        TitleTemplate.Defaults[0].Save(templates, newFile: true);
+        model.SetTemplates(templates);
+        File.Delete(templates);
+
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        var row = Assert.Single(model.Rows);
+        Assert.Equal("В очереди", row.Status);
+        Assert.Null(row.Result);
+        Assert.Contains("не удалось загрузить выбранный JSON", model.Message, StringComparison.OrdinalIgnoreCase);
+
+        model.SetTemplates(null);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Same(row, Assert.Single(model.Rows));
+        Assert.Equal("ABCD.123456.001", row.Designation);
+        Assert.Equal("Проверить", row.Status);
+    }
+
+    [Fact]
+    public async Task ScannerRetriesOnlyUnfinishedFilesAfterCancellation()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var firstPath = Path.Combine(inbox, "a.pdf");
+        var secondPath = Path.Combine(inbox, "b.pdf");
+        File.Copy(Pdf(Sheet(595, 842, 0)), firstPath);
+        File.Copy(Pdf(Sheet(595, 842, 0, "ABCD.123456.002")), secondPath);
+        var model = new MainViewModel { ScannerWatchEnabled = true };
+        model.SetScannerFolder(inbox);
+        model.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(model.Progress) && model.Progress == 50)
+                model.CancelCommand.Execute(null);
+        };
+
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        var first = Assert.Single(model.Rows, row => row.Source == firstPath);
+        var completed = Assert.IsType<RecognitionResult>(first.Result);
+        var second = Assert.Single(model.Rows, row => row.Source == secondPath);
+        Assert.Equal("В очереди", second.Status);
+        Assert.Null(second.Result);
+        Assert.Contains("Анализ отменён", model.Message);
+
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Same(completed, first.Result);
+        Assert.Equal("ABCD.123456.002", second.Designation);
+        Assert.Equal("Проверить", second.Status);
+    }
+
+    [Fact]
     public void LaterTitleSheetsAreFoundAndDifferentPairsRequireReview()
     {
         var analyzer = new DrawingAnalyzer();

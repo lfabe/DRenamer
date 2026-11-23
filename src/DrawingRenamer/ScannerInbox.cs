@@ -28,7 +28,11 @@ internal sealed class ScannerInbox(string folder)
                     if (!previous.TryGetValue(path, out var earlier) || earlier != version) continue;
                     using var input = File.OpenRead(path);
                     if (input.Length == version.Length && File.GetLastWriteTimeUtc(path) == version.LastWriteTimeUtc)
+                    {
                         ready.Add(path);
+                        // A new file at this path must establish stability again.
+                        current.Remove(path);
+                    }
                 }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
