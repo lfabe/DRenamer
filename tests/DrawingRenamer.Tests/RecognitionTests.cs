@@ -651,7 +651,10 @@ public sealed class RecognitionTests : IDisposable
     [InlineData("сдорочная единица", "сборочная единица")]
     [InlineData("СДОРОЧНЫЙ ЧЕРТЁЖ", "СБОРОЧНЫЙ ЧЕРТЁЖ")]
     [InlineData("Сварочный узел", "Сварочный узел")]
-    public void OcrNameCorrectsAssemblyWordWithoutChangingCase(string source, string expected)
+    [InlineData("Рама№1", "Рама № 1")]
+    [InlineData("Рама № 2", "Рама № 2")]
+    [InlineData("№1", "№ 1")]
+    public void OcrNameCorrectsRecognizedTextWithoutChangingPdfText(string source, string expected)
     {
         Assert.Equal(expected, DrawingAnalyzer.NormalizeOcrName(source));
         Assert.Equal(source, DrawingAnalyzer.NormalizeName(source));

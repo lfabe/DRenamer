@@ -373,10 +373,13 @@ public sealed class DrawingAnalyzer
     public static string NormalizeName(string value) => Regex.Replace(value.Normalize(NormalizationForm.FormC),
         @"\s+", " ").Trim();
 
-    internal static string NormalizeOcrName(string value) =>
-        Regex.Replace(NormalizeName(value), @"\bсдорочн(?:ый|ая|ое|ые)\b",
+    internal static string NormalizeOcrName(string value)
+    {
+        var corrected = Regex.Replace(NormalizeName(value), @"\bсдорочн(?:ый|ая|ое|ые)\b",
             match => match.Value[..1] + (char.IsUpper(match.Value[1]) ? "Б" : "б") + match.Value[2..],
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return Regex.Replace(corrected, @"\s*№\s*(?=[0-9])", " № ").Trim();
+    }
 
     internal static Candidate CorrectAssemblySuffix(Candidate candidate)
     {
