@@ -281,6 +281,63 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public async Task ManualSplitWorksWithAutomaticSplittingOffAndKeepsTheSource()
+    {
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"));
+        var path = Pdf(NumberedSheet("ABCD.123456.001", 1), NumberedSheet("ABCD.123456.001", 2));
+        var hash = RenameService.Hash(path);
+        await model.AddDocumentsAsync([path]);
+        var original = Assert.Single(model.Rows);
+        original.Included = false;
+
+        await model.SplitDocumentAsync(original);
+
+        Assert.Equal(new[] { "1", "2" }, model.Rows.Select(row => Path.GetFileNameWithoutExtension(row.Source).Split('_')[^1]));
+        Assert.All(model.Rows, row => { Assert.False(row.Included); Assert.True(File.Exists(row.Source)); });
+        Assert.Equal(hash, RenameService.Hash(path));
+        var single = model.Rows[0];
+        await model.SplitDocumentAsync(single);
+        Assert.Contains(single, model.Rows);
+        Assert.Contains("одна страница", model.Message);
+    }
+
+    [Fact]
+    public async Task RemovingGroupHeaderRemovesEverySheetOnlyFromTheQueue()
+    {
+        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { OcrEnabled = false, SplitScanBatches = true };
+        var first = Pdf(NumberedSheet("ABCD.123456.001", 1));
+        var second = Pdf(NumberedSheet("ABCD.123456.001", 2));
+        var third = Pdf(NumberedSheet("ABCD.123456.002", 1));
+        await model.AddDocumentsAsync([first, second, third]);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        var group = Assert.Single(model.MergeProposals);
+        var header = new DocumentRow(group.Label) { MergeProposal = group };
+        model.RemoveDocuments([header, group.Pages[0]]);
+
+        Assert.Equal(third, Assert.Single(model.Rows).Source);
+        Assert.Empty(model.MergeProposals);
+        Assert.True(File.Exists(first) && File.Exists(second));
+    }
+
+    [Fact]
+    public async Task BatchConfirmationUsesChecksAndAnalysisReportsElapsedTime()
+    {
+        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { OcrEnabled = false };
+        await model.AddDocumentsAsync([Pdf(NumberedSheet("ABCD.123456.001", 1)), Pdf(NumberedSheet("ABCD.123456.002", 1))]);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        Assert.Matches(@"Распознано: 2 · Потраченное время \d{2,}:\d{2}", model.Message);
+        Assert.Equal("62:03", MainViewModel.FormatAnalysisTime(new TimeSpan(1, 2, 3)));
+        foreach (var row in model.Rows) row.DocumentName = "NEW NAME";
+        model.Rows[1].Included = false;
+        model.Selected = model.Rows[1];
+
+        await model.ConfirmIncludedAsync();
+
+        Assert.True(model.Rows[0].Confirmed);
+        Assert.False(model.Rows[1].Confirmed);
+    }
+
+    [Fact]
     public async Task AttachAndDetachKeepOriginalRecognitionAndMergeInTheTargetFolder()
     {
         var model = new MainViewModel(Path.Combine(folder, "settings.json")) { OcrEnabled = false, SplitScanBatches = true };

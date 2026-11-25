@@ -7,7 +7,7 @@ public sealed partial class DocumentRow : ObservableObject
     public DocumentRow(string path) => Source = path;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(OriginalName), nameof(FileLabel))]
+    [NotifyPropertyChangedFor(nameof(OriginalName))]
     public partial string Source { get; set; }
 
     [ObservableProperty] public partial bool Included { get; set; } = true;
@@ -24,16 +24,21 @@ public sealed partial class DocumentRow : ObservableObject
     [ObservableProperty] public partial string Separator { get; set; } = "_";
     [ObservableProperty] public partial string SheetNumberText { get; set; } = "";
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(FileLabel), nameof(QueueNewName), nameof(QueueStatus))]
+    [NotifyPropertyChangedFor(nameof(QueueNewName), nameof(QueueStatus), nameof(ShowBranchContinuation))]
     public partial bool InMergeProposal { get; set; }
     [ObservableProperty] public partial bool ManuallyAssigned { get; set; }
     [ObservableProperty] public partial bool IsQueueDropTarget { get; set; }
+    [ObservableProperty] public partial bool MergeEnabled { get; set; }
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowBranchContinuation))]
+    public partial bool IsGroupTail { get; set; }
 
     public bool IsMergeHeader => MergeProposal is not null;
     public bool IsFile => !IsMergeHeader;
-    public string QueueStatus => InMergeProposal && IsFile ? "" : Status;
+    public string QueueStatus => IsFile && !InMergeProposal ? Status : "";
     public string QueueNewName => InMergeProposal ? "" : NewName;
-    public string FileLabel => InMergeProposal ? $"   ↳  {OriginalName}" : OriginalName;
+    public bool ShowBranchContinuation => InMergeProposal && !IsGroupTail;
+    public string RemoveQueueLabel => IsMergeHeader ? "Удалить группу из списка" : "Удалить из списка";
     public string GroupLabel => $"{(MergeExpanded ? "▾" : "▸")}  {MergeProposal?.Label}";
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(GroupLabel))]
@@ -43,7 +48,7 @@ public sealed partial class DocumentRow : ObservableObject
     {
         MergeProposal = proposal;
         Source = proposal.Label;
-        Status = proposal.CanMerge ? "К объединению" : "Проверить порядок";
+        Diagnostic = proposal.CanMerge ? "Сохранить листы этой группы в один PDF" : "Проверьте имя и номера листов группы";
         OnPropertyChanged(nameof(GroupLabel));
     }
     internal bool MergeEligible { get; set; }

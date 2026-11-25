@@ -8,9 +8,6 @@
         <Grid.Resources>
             <local:QueueColumns x:Key="FileQueueColumns"/>
             <Style x:Key="QueueGripStyle" TargetType="primitives:Thumb">
-                <Setter Property="Width" Value="10"/>
-                <Setter Property="Margin" Value="0,0,-5,0"/>
-                <Setter Property="HorizontalAlignment" Value="Right"/>
                 <Setter Property="IsTabStop" Value="True"/>
                 <Setter Property="Template">
                     <Setter.Value>
@@ -21,6 +18,13 @@
                         </ControlTemplate>
                     </Setter.Value>
                 </Setter>
+            </Style>
+            <Style x:Key="QueueDividerStyle" TargetType="local:QueueColumnDivider">
+                <Setter Property="Width" Value="10"/>
+                <Setter Property="Margin" Value="0,0,-5,0"/>
+                <Setter Property="HorizontalAlignment" Value="Right"/>
+                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                <Setter Property="VerticalContentAlignment" Value="Stretch"/>
             </Style>
         </Grid.Resources>
         <Grid.RowDefinitions>
@@ -68,8 +72,8 @@
                                                         DateChanged="ScannerStartDateChanged"/>
                                     <TimePicker x:Name="ScannerStartTimePicker" Header="Время" ClockIdentifier="24HourClock"
                                                 TimeChanged="ScannerStartTimeChanged"/>
-                                    <CheckBox Content="Разбивать пачки PDF"
-                                              IsChecked="{x:Bind ViewModel.SplitScanBatches, Mode=TwoWay}"/>
+                                    <ToggleSwitch Header="Разбивать пачки PDF" OnContent="Включено" OffContent="Выключено"
+                                                  IsOn="{x:Bind ViewModel.SplitScanBatches, Mode=TwoWay}"/>
                                 </StackPanel>
                                 <TextBlock Text="{x:Bind ViewModel.TemplateLabel, Mode=OneWay}" TextWrapping="Wrap"/>
                                 <StackPanel Orientation="Horizontal" Spacing="8">
@@ -101,9 +105,7 @@
                 </Button>
                 <Button x:Name="AnalyzeButton" Content="Распознать" Command="{x:Bind ViewModel.AnalyzeCommand}"/>
                 <Button x:Name="ConfirmButton" Content="Подтвердить" Click="ConfirmSelected"
-                        ToolTipService.ToolTip="Подтвердить значения в выделенных строках"/>
-                <Button x:Name="MergeButton" Content="Объединить" Click="MergeSelected"
-                        Style="{StaticResource AccentButtonStyle}" Visibility="Collapsed"/>
+                        ToolTipService.ToolTip="Подтвердить значения во всех отмеченных файлах"/>
                 <Button x:Name="CancelButton" Content="Остановить анализ" Visibility="Collapsed"
                         Command="{x:Bind ViewModel.CancelCommand}"/>
             </StackPanel>
@@ -120,38 +122,87 @@
                               VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
                 <Grid RowSpacing="8" Width="{Binding TableWidth, Source={StaticResource FileQueueColumns}}">
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <Grid Padding="12,12,20,4" ColumnSpacing="8">
+                    <Grid x:Name="QueueHeader" Padding="12,12,20,4" ColumnSpacing="8">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="28"/>
-                            <ColumnDefinition Width="{Binding Source, Source={StaticResource FileQueueColumns}}"/>
-                            <ColumnDefinition Width="{Binding Designation, Source={StaticResource FileQueueColumns}}"/>
-                            <ColumnDefinition Width="{Binding Title, Source={StaticResource FileQueueColumns}}"/>
-                            <ColumnDefinition Width="{Binding Sheet, Source={StaticResource FileQueueColumns}}"/>
-                            <ColumnDefinition Width="{Binding Target, Source={StaticResource FileQueueColumns}}"/>
-                            <ColumnDefinition Width="{Binding Status, Source={StaticResource FileQueueColumns}}"/>
+                            <ColumnDefinition Width="{Binding Width1, Source={StaticResource FileQueueColumns}}"/>
+                            <ColumnDefinition Width="{Binding Width2, Source={StaticResource FileQueueColumns}}"/>
+                            <ColumnDefinition Width="{Binding Width3, Source={StaticResource FileQueueColumns}}"/>
+                            <ColumnDefinition Width="{Binding Width4, Source={StaticResource FileQueueColumns}}"/>
+                            <ColumnDefinition Width="{Binding Width5, Source={StaticResource FileQueueColumns}}"/>
+                            <ColumnDefinition Width="{Binding Width6, Source={StaticResource FileQueueColumns}}"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="1" Text="Исходное имя" Style="{StaticResource CaptionTextBlockStyle}"/>
-                        <TextBlock Grid.Column="2" Text="Обозначение" Style="{StaticResource CaptionTextBlockStyle}"/>
-                        <TextBlock Grid.Column="3" Text="Наименование" Style="{StaticResource CaptionTextBlockStyle}"/>
-                        <TextBlock Grid.Column="4" Text="Лист" Style="{StaticResource CaptionTextBlockStyle}"/>
-                        <TextBlock Grid.Column="5" Text="Новое имя" Style="{StaticResource CaptionTextBlockStyle}"/>
-                        <TextBlock Grid.Column="6" Text="Статус" Style="{StaticResource CaptionTextBlockStyle}"/>
-                        <primitives:Thumb Grid.Column="1" Tag="Source" Style="{StaticResource QueueGripStyle}"
-                                               DragDelta="ResizeQueueColumn" KeyDown="ResizeQueueColumnKey" AutomationProperties.Name="Ширина столбца «Исходное имя»"/>
-                        <primitives:Thumb Grid.Column="2" Tag="Designation" Style="{StaticResource QueueGripStyle}"
-                                               DragDelta="ResizeQueueColumn" KeyDown="ResizeQueueColumnKey" AutomationProperties.Name="Ширина столбца «Обозначение»"/>
-                        <primitives:Thumb Grid.Column="3" Tag="Title" Style="{StaticResource QueueGripStyle}"
-                                               DragDelta="ResizeQueueColumn" KeyDown="ResizeQueueColumnKey" AutomationProperties.Name="Ширина столбца «Наименование»"/>
-                        <primitives:Thumb Grid.Column="4" Tag="Sheet" Style="{StaticResource QueueGripStyle}"
-                                               DragDelta="ResizeQueueColumn" KeyDown="ResizeQueueColumnKey" AutomationProperties.Name="Ширина столбца «Лист»"/>
-                        <primitives:Thumb Grid.Column="5" Tag="Target" Style="{StaticResource QueueGripStyle}"
-                                               DragDelta="ResizeQueueColumn" KeyDown="ResizeQueueColumnKey" AutomationProperties.Name="Ширина столбца «Новое имя»"/>
-                        <primitives:Thumb Grid.Column="6" Tag="Status" Style="{StaticResource QueueGripStyle}"
-                                               DragDelta="ResizeQueueColumn" KeyDown="ResizeQueueColumnKey" AutomationProperties.Name="Ширина столбца «Статус»"/>
+                        <CheckBox x:Name="AllFilesCheckBox" Click="ToggleAllFiles" IsThreeState="True" MinWidth="0" Padding="0"
+                                  AutomationProperties.Name="Отметить все файлы" ToolTipService.ToolTip="Отметить или снять отметки со всех файлов"/>
+                        <TextBlock Grid.Column="{Binding SourceIndex, Source={StaticResource FileQueueColumns}}" VerticalAlignment="Center" Text="Исходное имя"
+                                   TextTrimming="CharacterEllipsis" IsHitTestVisible="False" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <Border Grid.Column="{Binding SourceIndex, Source={StaticResource FileQueueColumns}}" Tag="Source" Background="Transparent" PointerPressed="BeginColumnMove" PointerMoved="TrackColumnMove" PointerReleased="FinishColumnMove" PointerCaptureLost="CancelColumnMove"/>
+                        <local:QueueColumnDivider Grid.Column="{Binding SourceIndex, Source={StaticResource FileQueueColumns}}" Style="{StaticResource QueueDividerStyle}" Canvas.ZIndex="1">
+                            <primitives:Thumb Tag="Source" Style="{StaticResource QueueGripStyle}" DragDelta="ResizeQueueColumn"
+                                              KeyDown="ResizeQueueColumnKey" DoubleTapped="AutoFitQueueColumn" AutomationProperties.Name="Ширина столбца «Исходное имя»"/>
+                        </local:QueueColumnDivider>
+                        <TextBlock Grid.Column="{Binding DesignationIndex, Source={StaticResource FileQueueColumns}}" VerticalAlignment="Center" Text="Обозначение"
+                                   TextTrimming="CharacterEllipsis" IsHitTestVisible="False" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <Border Grid.Column="{Binding DesignationIndex, Source={StaticResource FileQueueColumns}}" Tag="Designation" Background="Transparent" PointerPressed="BeginColumnMove" PointerMoved="TrackColumnMove" PointerReleased="FinishColumnMove" PointerCaptureLost="CancelColumnMove"/>
+                        <local:QueueColumnDivider Grid.Column="{Binding DesignationIndex, Source={StaticResource FileQueueColumns}}" Style="{StaticResource QueueDividerStyle}" Canvas.ZIndex="1">
+                            <primitives:Thumb Tag="Designation" Style="{StaticResource QueueGripStyle}" DragDelta="ResizeQueueColumn"
+                                              KeyDown="ResizeQueueColumnKey" DoubleTapped="AutoFitQueueColumn" AutomationProperties.Name="Ширина столбца «Обозначение»"/>
+                        </local:QueueColumnDivider>
+                        <TextBlock Grid.Column="{Binding TitleIndex, Source={StaticResource FileQueueColumns}}" VerticalAlignment="Center" Text="Наименование"
+                                   TextTrimming="CharacterEllipsis" IsHitTestVisible="False" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <Border Grid.Column="{Binding TitleIndex, Source={StaticResource FileQueueColumns}}" Tag="Title" Background="Transparent" PointerPressed="BeginColumnMove" PointerMoved="TrackColumnMove" PointerReleased="FinishColumnMove" PointerCaptureLost="CancelColumnMove"/>
+                        <local:QueueColumnDivider Grid.Column="{Binding TitleIndex, Source={StaticResource FileQueueColumns}}" Style="{StaticResource QueueDividerStyle}" Canvas.ZIndex="1">
+                            <primitives:Thumb Tag="Title" Style="{StaticResource QueueGripStyle}" DragDelta="ResizeQueueColumn"
+                                              KeyDown="ResizeQueueColumnKey" DoubleTapped="AutoFitQueueColumn" AutomationProperties.Name="Ширина столбца «Наименование»"/>
+                        </local:QueueColumnDivider>
+                        <TextBlock Grid.Column="{Binding SheetIndex, Source={StaticResource FileQueueColumns}}" VerticalAlignment="Center" Text="Лист"
+                                   TextTrimming="CharacterEllipsis" IsHitTestVisible="False" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <Border Grid.Column="{Binding SheetIndex, Source={StaticResource FileQueueColumns}}" Tag="Sheet" Background="Transparent" PointerPressed="BeginColumnMove" PointerMoved="TrackColumnMove" PointerReleased="FinishColumnMove" PointerCaptureLost="CancelColumnMove"/>
+                        <local:QueueColumnDivider Grid.Column="{Binding SheetIndex, Source={StaticResource FileQueueColumns}}" Style="{StaticResource QueueDividerStyle}" Canvas.ZIndex="1">
+                            <primitives:Thumb Tag="Sheet" Style="{StaticResource QueueGripStyle}" DragDelta="ResizeQueueColumn"
+                                              KeyDown="ResizeQueueColumnKey" DoubleTapped="AutoFitQueueColumn" AutomationProperties.Name="Ширина столбца «Лист»"/>
+                        </local:QueueColumnDivider>
+                        <TextBlock Grid.Column="{Binding TargetIndex, Source={StaticResource FileQueueColumns}}" VerticalAlignment="Center" Text="Новое имя"
+                                   TextTrimming="CharacterEllipsis" IsHitTestVisible="False" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <Border Grid.Column="{Binding TargetIndex, Source={StaticResource FileQueueColumns}}" Tag="Target" Background="Transparent" PointerPressed="BeginColumnMove" PointerMoved="TrackColumnMove" PointerReleased="FinishColumnMove" PointerCaptureLost="CancelColumnMove"/>
+                        <local:QueueColumnDivider Grid.Column="{Binding TargetIndex, Source={StaticResource FileQueueColumns}}" Style="{StaticResource QueueDividerStyle}" Canvas.ZIndex="1">
+                            <primitives:Thumb Tag="Target" Style="{StaticResource QueueGripStyle}" DragDelta="ResizeQueueColumn"
+                                              KeyDown="ResizeQueueColumnKey" DoubleTapped="AutoFitQueueColumn" AutomationProperties.Name="Ширина столбца «Новое имя»"/>
+                        </local:QueueColumnDivider>
+                        <TextBlock Grid.Column="{Binding StatusIndex, Source={StaticResource FileQueueColumns}}" VerticalAlignment="Center" Text="Статус"
+                                   TextTrimming="CharacterEllipsis" IsHitTestVisible="False" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <Border Grid.Column="{Binding StatusIndex, Source={StaticResource FileQueueColumns}}" Tag="Status" Background="Transparent" PointerPressed="BeginColumnMove" PointerMoved="TrackColumnMove" PointerReleased="FinishColumnMove" PointerCaptureLost="CancelColumnMove"/>
+                        <local:QueueColumnDivider Grid.Column="{Binding StatusIndex, Source={StaticResource FileQueueColumns}}" Style="{StaticResource QueueDividerStyle}" Canvas.ZIndex="1">
+                            <primitives:Thumb Tag="Status" Style="{StaticResource QueueGripStyle}" DragDelta="ResizeQueueColumn"
+                                              KeyDown="ResizeQueueColumnKey" DoubleTapped="AutoFitQueueColumn" AutomationProperties.Name="Ширина столбца «Статус»"/>
+                        </local:QueueColumnDivider>
+                        <Canvas Grid.ColumnSpan="7" Margin="-12,0,-20,0" Canvas.ZIndex="2" IsHitTestVisible="False">
+                            <Border x:Name="ColumnMoveGuide" Width="2" Height="22" Visibility="Collapsed" Background="{ThemeResource AccentFillColorDefaultBrush}"/>
+                        </Canvas>
                     </Grid>
                     <ListView x:Name="Documents" Grid.Row="1" SelectionMode="Extended"
                               SelectedItem="{x:Bind ViewModel.Selected, Mode=TwoWay}" SelectionChanged="SelectionChanged"
                               KeyDown="DocumentsKeyDown" AutomationProperties.Name="Документы">
+                        <ListView.Resources>
+                            <ResourceDictionary>
+                                <ResourceDictionary.ThemeDictionaries>
+                                    <ResourceDictionary x:Key="Light">
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="#E5F3FF"/>
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundPressed" Color="#CCE8FF"/>
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#CCE8FF"/>
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="#B9DEFF"/>
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPressed" Color="#B9DEFF"/>
+                                    </ResourceDictionary>
+                                    <ResourceDictionary x:Key="Dark">
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="#283A4B"/>
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundPressed" Color="#344B60"/>
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="#344B60"/>
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="#405B73"/>
+                                        <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPressed" Color="#405B73"/>
+                                    </ResourceDictionary>
+                                </ResourceDictionary.ThemeDictionaries>
+                            </ResourceDictionary>
+                        </ListView.Resources>
                         <ListView.ItemsPanel>
                             <ItemsPanelTemplate><ItemsStackPanel ItemsUpdatingScrollMode="KeepScrollOffset"/></ItemsPanelTemplate>
                         </ListView.ItemsPanel>
@@ -170,20 +221,21 @@
                                       AutomationProperties.Name="{x:Bind OriginalName, Mode=OneWay}">
                                     <Grid.ContextFlyout>
                                         <MenuFlyout>
-                                            <MenuFlyoutItem Text="Распознать" Tag="{x:Bind}" Click="AnalyzeDocumentFromMenu"/>
+                                            <MenuFlyoutItem Text="Распознать" Tag="{x:Bind}" Click="AnalyzeDocumentFromMenu" Visibility="{x:Bind IsFile}"/>
+                                            <MenuFlyoutItem Text="Разбить" Tag="{x:Bind}" Click="SplitFromMenu" Visibility="{x:Bind IsFile}"/>
                                             <MenuFlyoutItem Text="Убрать из группы" Tag="{x:Bind}" Click="DetachMergePage"
                                                             Visibility="{x:Bind ManuallyAssigned, Mode=OneWay}"/>
-                                            <MenuFlyoutItem Text="Удалить из списка" Tag="{x:Bind}" Click="RemoveDocumentFromMenu"/>
+                                            <MenuFlyoutItem Text="{x:Bind RemoveQueueLabel}" Tag="{x:Bind}" Click="RemoveDocumentFromMenu"/>
                                         </MenuFlyout>
                                     </Grid.ContextFlyout>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="28"/>
-                                        <ColumnDefinition Width="{Binding Source, Source={StaticResource FileQueueColumns}}"/>
-                                        <ColumnDefinition Width="{Binding Designation, Source={StaticResource FileQueueColumns}}"/>
-                                        <ColumnDefinition Width="{Binding Title, Source={StaticResource FileQueueColumns}}"/>
-                                        <ColumnDefinition Width="{Binding Sheet, Source={StaticResource FileQueueColumns}}"/>
-                                        <ColumnDefinition Width="{Binding Target, Source={StaticResource FileQueueColumns}}"/>
-                                        <ColumnDefinition Width="{Binding Status, Source={StaticResource FileQueueColumns}}"/>
+                                        <ColumnDefinition Width="{Binding Width1, Source={StaticResource FileQueueColumns}}"/>
+                                        <ColumnDefinition Width="{Binding Width2, Source={StaticResource FileQueueColumns}}"/>
+                                        <ColumnDefinition Width="{Binding Width3, Source={StaticResource FileQueueColumns}}"/>
+                                        <ColumnDefinition Width="{Binding Width4, Source={StaticResource FileQueueColumns}}"/>
+                                        <ColumnDefinition Width="{Binding Width5, Source={StaticResource FileQueueColumns}}"/>
+                                        <ColumnDefinition Width="{Binding Width6, Source={StaticResource FileQueueColumns}}"/>
                                     </Grid.ColumnDefinitions>
                                     <Border Grid.ColumnSpan="7" BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
                                             BorderThickness="1" CornerRadius="4" IsHitTestVisible="False"
@@ -191,22 +243,36 @@
                                     <CheckBox IsChecked="{x:Bind Included, Mode=TwoWay}" MinWidth="0" Padding="0"
                                               Visibility="{x:Bind IsFile}"
                                               AutomationProperties.Name="{x:Bind OriginalName, Mode=OneWay}"/>
-                                    <TextBlock Grid.Column="1" Text="{x:Bind FileLabel, Mode=OneWay}" Visibility="{x:Bind IsFile}" TextTrimming="CharacterEllipsis"
-                                               VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind Source, Mode=OneWay}"/>
-                                    <TextBlock Grid.Column="2" Text="{x:Bind Designation, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+                                    <Grid Grid.Column="{Binding SourceIndex, Source={StaticResource FileQueueColumns}}" Visibility="{x:Bind IsFile}">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                        <Grid Width="22" Visibility="{x:Bind InMergeProposal, Mode=OneWay}" IsHitTestVisible="False">
+                                            <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                                            <Border Width="1" HorizontalAlignment="Left" Margin="4,0,0,0" Background="{ThemeResource TextFillColorTertiaryBrush}"/>
+                                            <Border Grid.Row="1" Width="12" Height="1" HorizontalAlignment="Left" VerticalAlignment="Top"
+                                                    Margin="4,0,0,0" Background="{ThemeResource TextFillColorTertiaryBrush}"/>
+                                            <Border Grid.Row="1" Width="1" HorizontalAlignment="Left" Margin="4,0,0,0"
+                                                    Background="{ThemeResource TextFillColorTertiaryBrush}" Visibility="{x:Bind ShowBranchContinuation, Mode=OneWay}"/>
+                                        </Grid>
+                                        <TextBlock Grid.Column="1" Text="{x:Bind OriginalName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+                                                   VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind Source, Mode=OneWay}"/>
+                                    </Grid>
+                                    <TextBlock Grid.Column="{Binding DesignationIndex, Source={StaticResource FileQueueColumns}}" Text="{x:Bind Designation, Mode=OneWay}" TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center"/>
-                                    <TextBlock Grid.Column="3" Text="{x:Bind DocumentName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+                                    <TextBlock Grid.Column="{Binding TitleIndex, Source={StaticResource FileQueueColumns}}" Text="{x:Bind DocumentName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center"/>
-                                    <TextBlock Grid.Column="4" Text="{x:Bind SheetNumberText, Mode=OneWay}" VerticalAlignment="Center"/>
-                                    <TextBlock Grid.Column="5" Text="{x:Bind QueueNewName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+                                    <TextBlock Grid.Column="{Binding SheetIndex, Source={StaticResource FileQueueColumns}}" Text="{x:Bind SheetNumberText, Mode=OneWay}" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="{Binding TargetIndex, Source={StaticResource FileQueueColumns}}" Text="{x:Bind QueueNewName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind QueueNewName, Mode=OneWay}"/>
-                                    <TextBlock Grid.Column="6" Text="{x:Bind QueueStatus, Mode=OneWay}" TextWrapping="Wrap"
+                                    <TextBlock Grid.Column="{Binding StatusIndex, Source={StaticResource FileQueueColumns}}" Text="{x:Bind QueueStatus, Mode=OneWay}" TextWrapping="Wrap"
                                                VerticalAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}"
                                                ToolTipService.ToolTip="{x:Bind Diagnostic, Mode=OneWay}"
                                                AutomationProperties.HelpText="{x:Bind Diagnostic, Mode=OneWay}"/>
-                                    <Button Grid.ColumnSpan="6" Content="{x:Bind GroupLabel, Mode=OneWay}" Tag="{x:Bind}" Click="ToggleMergeGroup"
+                                    <Button Grid.Column="{Binding GroupIndex, Source={StaticResource FileQueueColumns}}" Grid.ColumnSpan="{Binding GroupSpan, Source={StaticResource FileQueueColumns}}" Content="{x:Bind GroupLabel, Mode=OneWay}" Tag="{x:Bind}" Click="ToggleMergeGroup"
                                             Visibility="{x:Bind IsMergeHeader}" HorizontalAlignment="Left"
-                                            FontWeight="SemiBold" ToolTipService.ToolTip="Свернуть или раскрыть листы"/>
+                                            Padding="4,3,8,3" FontWeight="SemiBold" ToolTipService.ToolTip="Свернуть или раскрыть листы"/>
+                                    <Button Grid.Column="{Binding StatusIndex, Source={StaticResource FileQueueColumns}}" Content="Объединить" Tag="{x:Bind}" Click="MergeSelected" Padding="7,4"
+                                            Visibility="{x:Bind IsMergeHeader}" IsEnabled="{x:Bind MergeEnabled, Mode=OneWay}"
+                                            Style="{StaticResource AccentButtonStyle}" ToolTipService.ToolTip="{x:Bind Diagnostic, Mode=OneWay}"/>
                                 </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>
@@ -242,13 +308,19 @@
                                     AutomationProperties.Name="Вписать страницу целиком" ToolTipService.ToolTip="Вписать страницу целиком">
                                 <FontIcon Glyph="&#xE9A6;" FontSize="16"/>
                             </Button>
+                            <Button x:Name="FitStampButton" Click="FitStamp" IsEnabled="False"
+                                    AutomationProperties.Name="Вписать по штампу" ToolTipService.ToolTip="Вписать по штампу">
+                                <FontIcon Glyph="&#xE91B;" FontSize="16"/>
+                            </Button>
                         </StackPanel>
                     </Grid>
                     <Border Grid.Row="1" MinHeight="140" CornerRadius="4" Background="{ThemeResource SubtleFillColorSecondaryBrush}">
                         <Grid>
                             <ScrollViewer x:Name="PreviewScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                                          PointerWheelChanged="ScrollPreviewHorizontally"
                                           ZoomMode="Enabled" MinZoomFactor=".25" MaxZoomFactor="5">
-                                <Canvas x:Name="SheetExtent" HorizontalAlignment="Center" VerticalAlignment="Top">
+                                <Canvas x:Name="SheetExtent" HorizontalAlignment="Center" VerticalAlignment="Top"
+                                        PointerWheelChanged="ScrollPreviewHorizontally">
                                     <Canvas x:Name="Sheet" Background="White" RenderTransformOrigin="0.5,0.5"
                                             PointerPressed="RegionPressed" PointerMoved="RegionMoved" PointerReleased="RegionReleased"
                                             PointerCaptureLost="RegionCaptureLost">
@@ -321,8 +393,9 @@
         </Grid>
         <Grid Grid.Row="3" ColumnSpacing="14">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="180"/></Grid.ColumnDefinitions>
-            <TextBlock Text="{x:Bind ViewModel.Message, Mode=OneWay}" TextTrimming="CharacterEllipsis"
-                       Style="{StaticResource CaptionTextBlockStyle}" AutomationProperties.LiveSetting="Polite"/>
+            <TextBlock TextTrimming="CharacterEllipsis" Style="{StaticResource CaptionTextBlockStyle}">
+                <Run Text="{x:Bind ViewModel.Message, Mode=OneWay}"/><Run x:Name="AnalysisClockText"/>
+            </TextBlock>
             <ProgressBar Grid.Column="1" Value="{x:Bind ViewModel.Progress, Mode=OneWay}" Maximum="100"
                          AutomationProperties.Name="Ход обработки"/>
         </Grid>

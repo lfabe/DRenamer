@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -286,7 +287,8 @@ public sealed partial class MainViewModel : ObservableObject
     public void RemoveDocuments(IEnumerable<DocumentRow> selection)
     {
         if (Busy) return;
-        var targets = selection.ToHashSet();
+        var targets = selection.SelectMany(row => row.MergeProposal is { } header
+            ? MergeProposals.FirstOrDefault(group => SameMergeKey(group.Key, header.Key))?.Pages ?? [] : [row]).ToHashSet();
         var active = Selected;
         var activeIndex = active is null ? -1 : Rows.IndexOf(active);
         var nextIndex = activeIndex;
@@ -310,6 +312,36 @@ public sealed partial class MainViewModel : ObservableObject
             Selected = Rows.Count == 0 ? null : Rows[Math.Min(nextIndex, Rows.Count - 1)];
         Message = count == 1 ? $"Удалено из списка: {removed.OriginalName}." : $"Удалено из списка: {count}.";
     }
+
+    internal Task SplitDocumentAsync(DocumentRow row) => WorkAsync(async () =>
+    {
+        if (!Rows.Contains(row)) return;
+        var (paths, warning) = await PrepareBatchFilesAsync([row.Source], manual: true);
+        if (paths.Length < 2)
+        {
+            Message = warning ?? "В PDF только одна страница.";
+            return;
+        }
+
+        individualFiles.Remove(row.Source);
+        excludedFiles.Add(row.Source);
+        excludedFiles.ExceptWith(paths);
+        individualFiles.UnionWith(paths);
+        var index = Rows.IndexOf(row);
+        Rows.RemoveAt(index);
+        var existing = Rows.Select(item => item.Source).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        DocumentRow? first = null;
+        foreach (var path in paths)
+        {
+            if (!existing.Add(path)) continue;
+            var page = new DocumentRow(path) { Separator = separator, Included = row.Included };
+            Rows.Insert(index++, page);
+            first ??= page;
+        }
+        RefreshMergeProposals();
+        if (first is not null) Selected = first;
+        Message = $"Разбито на страницы: {paths.Length}. {warning}".TrimEnd();
+    });
 
     private int AddRows(IEnumerable<string> paths)
     {
@@ -379,7 +411,7 @@ public sealed partial class MainViewModel : ObservableObject
         });
     }
 
-    private async Task<(string[] Paths, string? Warning)> PrepareBatchFilesAsync(IEnumerable<string> paths)
+    private async Task<(string[] Paths, string? Warning)> PrepareBatchFilesAsync(IEnumerable<string> paths, bool manual = false)
     {
         var files = paths.ToArray();
         var result = await Task.Run(() =>
@@ -392,12 +424,15 @@ public sealed partial class MainViewModel : ObservableObject
                 {
                     using var input = File.OpenRead(path);
                     var version = new ScannerInbox.FileVersion(new FileInfo(path));
-                    if (handledBatches.TryGetValue(path, out var previous) && previous == version) continue;
-                    var receipt = BatchReceipt(path);
-                    if (File.Exists(receipt) && File.ReadAllText(receipt) == RenameService.Hash(input))
+                    if (!manual)
                     {
-                        handledBatches[path] = version;
-                        continue;
+                        if (handledBatches.TryGetValue(path, out var previous) && previous == version) continue;
+                        var receipt = BatchReceipt(path);
+                        if (File.Exists(receipt) && File.ReadAllText(receipt) == RenameService.Hash(input))
+                        {
+                            handledBatches[path] = version;
+                            continue;
+                        }
                     }
                     var pages = PdfRenderer.SplitPages(path);
                     ready.AddRange(pages);
@@ -417,7 +452,7 @@ public sealed partial class MainViewModel : ObservableObject
             }
             return (ready, warning);
         });
-        return (result.ready.Where(path => !excludedFiles.Contains(path)).ToArray(), result.warning);
+        return (result.ready.Where(path => manual || !excludedFiles.Contains(path)).ToArray(), result.warning);
     }
 
     private string BatchReceipt(string path)
@@ -588,6 +623,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (Busy || batch.Length == 0) return;
         using var operation = new CancellationTokenSource();
         cancellation = operation;
+        analysisClock.Restart();
         Progress = 0;
         try
         {
@@ -623,17 +659,23 @@ public sealed partial class MainViewModel : ObservableObject
                 if (proposeMerges)
                     foreach (var row in batch) row.MergeEligible = row.Result?.PageCount == 1;
                 RefreshMergeProposals();
-                Message = MergeProposals.Count == 0
-                    ? $"Распознано: {processed}. Сохранено подтверждённых: {batch.Length - processed}."
-                    : $"Распознано: {processed}. Предложения к объединению: {MergeProposals.Count}.";
+                analysisClock.Stop();
+                var detail = MergeProposals.Count == 0 ? $"Сохранено подтверждённых: {batch.Length - processed}"
+                    : $"Предложения к объединению: {MergeProposals.Count}";
+                Message = $"Распознано: {processed} · Потраченное время {AnalysisElapsed} · {detail}";
             });
         }
         finally
         {
+            analysisClock.Stop();
             cancellation = null;
             if (operation.IsCancellationRequested) RefreshMergeProposals();
         }
     }
+
+    private readonly Stopwatch analysisClock = new();
+    internal string AnalysisElapsed => FormatAnalysisTime(analysisClock.Elapsed);
+    internal static string FormatAnalysisTime(TimeSpan elapsed) => $"{(int)elapsed.TotalMinutes:00}:{elapsed.Seconds:00}";
 
     [RelayCommand]
     private void Cancel() => cancellation?.Cancel();
@@ -665,6 +707,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     public Task ConfirmAsync(DocumentRow row) => WorkAsync(async () =>
         Message = await ConfirmRowAsync(row) ? "Значения подтверждены." : row.Diagnostic);
+
+    internal Task ConfirmIncludedAsync() => ConfirmSelectedAsync(Rows.Where(row => row.Included));
 
     public Task ConfirmSelectedAsync(IEnumerable<DocumentRow> selection)
     {
