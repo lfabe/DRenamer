@@ -140,11 +140,17 @@ public sealed class PdfRenderer
 
     public PageAlignment? FindPageAlignment(Stream input, int number, IReadOnlyList<TitleTemplate>? templates, CancellationToken token)
     {
-        var raster = WithDocument(input, document => RenderPage(document, number, Area.Full, 1800, token, 0), token);
+        var raster = WithDocument(input, document => RenderPage(document, number, Area.Full, 2300, token, 0), token);
+        var (width, height) = PageSize(input, number, token);
+        return FindPageAlignment(raster, width, height, templates, token);
+    }
+
+    internal static PageAlignment? FindPageAlignment(Raster raster, double width, double height,
+        IReadOnlyList<TitleTemplate>? templates, CancellationToken token)
+    {
         var slope = ScanDeskew.FindFrameSlope(raster, token);
         if (slope is null)
         {
-            var (width, height) = PageSize(input, number, token);
             var stampSlopes = ScanTitleLocator.Find(raster, width, height, templates ?? TitleTemplate.Defaults,
                 turn => raster.Orient(turn), token).Select(stamp => stamp.Slope).Distinct().ToArray();
             if (stampSlopes.Length == 0 || stampSlopes.Max() - stampSlopes.Min() > .006) return null;
@@ -153,50 +159,11 @@ public sealed class PdfRenderer
         return PageAlignment.ForScan(raster, -Math.Atan(slope.Value) * 180 / Math.PI, token);
     }
 
-    public static void SaveAlignedCopy(string source, string destination, string expectedHash,
-        IReadOnlyDictionary<int, (PageAlignment Alignment, int Turns)> pages)
-    {
-        source = Path.GetFullPath(source);
-        destination = Path.GetFullPath(destination);
-        if (string.Equals(source, destination, StringComparison.OrdinalIgnoreCase))
-            throw new IOException("Выберите другое имя для выровненной копии.");
-        if (pages.Count == 0) throw new ArgumentException("Выберите листы для выравнивания.", nameof(pages));
-
-        var temporary = Path.Combine(Path.GetDirectoryName(destination)!, $".drawing-renamer-{Guid.NewGuid():N}.tmp");
-        try
-        {
-            using var input = File.OpenRead(source);
-            if (RenameService.Hash(input) != expectedHash)
-                throw new InvalidDataException("PDF изменился. Откройте его заново.");
-            using (var output = new FileStream(temporary, FileMode.CreateNew))
-            {
-                WithDocument(input, document =>
-                {
-                    const uint modifyContents = 1 << 3;
-                    if ((Native.FPDF_GetDocPermissions(document) & modifyContents) == 0)
-                        throw new InvalidDataException("Параметры защиты PDF запрещают менять содержимое листов.");
-                    var count = Native.FPDF_GetPageCount(document);
-                    foreach (var (number, (alignment, turns)) in pages)
-                    {
-                        if (number < 1 || number > count || turns is < 0 or > 3 ||
-                            !double.IsFinite(alignment.Angle) || Math.Abs(alignment.Angle) > 4 ||
-                            !double.IsFinite(alignment.Scale) || alignment.Scale is <= 0 or > 1)
-                            throw new InvalidDataException("Указаны недопустимые параметры выравнивания листа.");
-                        AlignPage(document, number, alignment, turns);
-                    }
-                    const uint noIncremental = 2;
-                    return Save(document, output, noIncremental);
-                });
-                output.Flush(flushToDisk: true);
-            }
-            // Keep the source open until publication so it cannot be replaced through an alias.
-            File.Move(temporary, destination, overwrite: true);
-        }
-        finally { File.Delete(temporary); }
-    }
-
     private static unsafe void AlignPage(IntPtr document, int number, PageAlignment alignment, int turns)
     {
+        if (!double.IsFinite(alignment.Angle) || Math.Abs(alignment.Angle) > 4 ||
+            !double.IsFinite(alignment.Scale) || alignment.Scale is <= 0 or > 1)
+            throw new InvalidDataException("Указаны недопустимые параметры выравнивания листа.");
         var page = Native.FPDF_LoadPage(document, number - 1);
         if (page == IntPtr.Zero) throw new InvalidDataException("Не удалось открыть страницу PDF.");
         try
@@ -221,21 +188,30 @@ public sealed class PdfRenderer
         finally { Native.FPDF_ClosePage(page); }
     }
 
-    internal static void SaveRotated(Stream input, Stream output, IReadOnlyDictionary<int, int> rotations)
+    internal static void SavePageEdits(Stream input, Stream output, IReadOnlyDictionary<int, int>? rotations,
+        IReadOnlyDictionary<int, PageAlignment>? alignments)
     {
         WithDocument(input, document =>
         {
             const uint modifyContents = 1 << 3;
             const uint assemblePages = 1 << 10;
-            var requiredPermission = Native.FPDF_GetSecurityHandlerRevision(document) < 3 ? modifyContents : assemblePages;
-            if ((Native.FPDF_GetDocPermissions(document) & requiredPermission) == 0)
-                throw new InvalidDataException("Параметры защиты PDF запрещают поворачивать листы.");
+            var permissions = Native.FPDF_GetDocPermissions(document);
+            var rotationPermission = Native.FPDF_GetSecurityHandlerRevision(document) < 3 ? modifyContents : assemblePages;
+            if ((rotations?.Count > 0 && (permissions & rotationPermission) == 0) ||
+                (alignments?.Count > 0 && (permissions & modifyContents) == 0))
+                throw new InvalidDataException("Параметры защиты PDF запрещают менять листы.");
 
             var count = Native.FPDF_GetPageCount(document);
-            foreach (var (number, turns) in rotations)
+            foreach (var number in (rotations?.Keys ?? []).Union(alignments?.Keys ?? []))
             {
-                if (number < 1 || number > count || turns is < 1 or > 3)
+                var turns = rotations?.GetValueOrDefault(number) ?? 0;
+                if (number < 1 || number > count || turns is < 0 or > 3)
                     throw new InvalidDataException("Указан недопустимый номер листа или угол поворота.");
+                if (alignments?.TryGetValue(number, out var alignment) == true)
+                {
+                    AlignPage(document, number, alignment, turns);
+                    continue;
+                }
                 var page = Native.FPDF_LoadPage(document, number - 1);
                 if (page == IntPtr.Zero) throw new InvalidDataException("Не удалось открыть страницу PDF.");
                 try { Native.FPDFPage_SetRotation(page, (Native.FPDFPage_GetRotation(page) + turns) % 4); }
@@ -288,7 +264,7 @@ public sealed class PdfRenderer
         });
     }
 
-    public static void MergePages(string path, IReadOnlyList<(string Path, string Hash, int Turn)> pages)
+    public static void MergePages(string path, IReadOnlyList<(string Path, string Hash, int Turn, PageAlignment? Alignment)> pages)
     {
         if (pages.Count < 2) throw new ArgumentException("Выберите хотя бы два листа PDF.", nameof(pages));
         path = Path.GetFullPath(path);
@@ -301,7 +277,7 @@ public sealed class PdfRenderer
                 {
                     for (var index = 0; index < pages.Count; index++)
                     {
-                        var (sourcePath, hash, turn) = pages[index];
+                        var (sourcePath, hash, turn, alignment) = pages[index];
                         if (turn is < 0 or > 3) throw new InvalidDataException("Указан недопустимый угол поворота листа.");
                         using var input = File.OpenRead(sourcePath);
                         if (RenameService.Hash(input) != hash)
@@ -310,7 +286,10 @@ public sealed class PdfRenderer
                         {
                             if (Native.FPDF_GetPageCount(source) != 1)
                                 throw new InvalidDataException("Для объединения выберите одностраничные PDF.");
+                            if (alignment is not null && (Native.FPDF_GetDocPermissions(source) & (1u << 3)) == 0)
+                                throw new InvalidDataException("Параметры защиты PDF запрещают менять листы.");
                             ImportPage(target, source, 0, index, turn);
+                            if (alignment is { } adjusted) AlignPage(target, index + 1, adjusted, 0);
                             return true;
                         });
                     }

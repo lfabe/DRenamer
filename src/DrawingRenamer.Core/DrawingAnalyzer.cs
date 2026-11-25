@@ -11,6 +11,8 @@ public sealed record RecognitionOptions(bool OcrEnabled = true, string Languages
     IReadOnlyList<TitleTemplate>? Templates = null)
 {
     public bool ReadSheetNumber { get; init; }
+    public bool DetectPageAlignment { get; init; }
+    public IReadOnlyDictionary<string, IReadOnlySet<int>>? SavedPageAlignments { get; init; }
 }
 public sealed record Candidate(string Designation, string Name, int Page, int Turn, FieldRegions Regions,
     string Method, double? OcrConfidence = null, bool Verified = false)
@@ -26,6 +28,7 @@ public sealed record RecognitionResult(RecognitionStatus Status, int PageCount, 
     string Diagnostic)
 {
     public string? SourceHash { get; init; }
+    public IReadOnlyDictionary<int, PageAlignment>? PageAlignments { get; init; }
 }
 
 public sealed class DrawingAnalyzer
@@ -38,6 +41,7 @@ public sealed class DrawingAnalyzer
         var continuations = new List<Candidate>();
         var incomplete = new List<Candidate>();
         var sheetLayouts = new List<LocatedTitle>();
+        var pageAlignments = options.DetectPageAlignment ? new Dictionary<int, PageAlignment>() : null;
         var pages = 0;
         var failed = 0;
         var locatedTitle = false;
@@ -50,6 +54,7 @@ public sealed class DrawingAnalyzer
             token.ThrowIfCancellationRequested();
             using var input = File.OpenRead(path);
             sourceHash = RenameService.Hash(input);
+            var alreadyAligned = options.SavedPageAlignments?.GetValueOrDefault(sourceHash);
             input.Position = 0;
             using var document = OpenTextDocument(input, options.OcrEnabled);
             pages = document?.NumberOfPages ?? renderer.CountPages(input, token);
@@ -63,10 +68,23 @@ public sealed class DrawingAnalyzer
                     var (width, height) = page is null ? renderer.PageSize(input, number, token) : (page.Width, page.Height);
                     var found = Find(sheet?.Lines(token) ?? [], width, height, templates, token).ToList();
                     Raster? scan = null;
+                    Raster? raster = null;
+                    if (pageAlignments is not null && alreadyAligned?.Contains(number) == true)
+                        pageAlignments[number] = PageAlignment.Original;
+                    else if (pageAlignments is not null)
+                    {
+                        try
+                        {
+                            raster = renderer.Render(path, number, Area.Full, 2300, token);
+                            if (PdfRenderer.FindPageAlignment(raster, width, height, templates, token) is { } alignment)
+                                pageAlignments[number] = alignment;
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException) { }
+                    }
                     ScanTitle[]? fittedScans = null;
                     if (found.Count == 0 && options.OcrEnabled)
                     {
-                        var raster = renderer.Render(path, number, Area.Full, 2300, token);
+                        raster ??= renderer.Render(path, number, Area.Full, 2300, token);
                         var rasterLines = raster.FindLines(Area.Full, token).ToArray();
                         found.AddRange(Find(rasterLines, width, height, templates, token));
                         if (page is null || page.NumberOfImages > 0) scan = raster;
@@ -243,7 +261,7 @@ public sealed class DrawingAnalyzer
             _ when locatedTitle => "Штамп найден, но графы не прочитаны. Заполните пустые графы вручную или выделите текст на листе.",
             _ => "Графы не распознаны. Выделите их на листе или введите данные."
         };
-        return new(status, pages, pairs, diagnostic) { SourceHash = sourceHash };
+        return new(status, pages, pairs, diagnostic) { SourceHash = sourceHash, PageAlignments = pageAlignments };
     }
 
     private int? ReadSheetNumber(string path, Candidate candidate, IReadOnlyList<LocatedTitle> layouts,

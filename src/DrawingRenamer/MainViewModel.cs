@@ -577,7 +577,8 @@ public sealed partial class MainViewModel : ObservableObject
 
         var ordered = current.Ordered;
         var output = Path.Combine(current.Folder, fileName);
-        var inputs = ordered.Select(row => (row.Source, row.SourceHash!, row.PageRotations.GetValueOrDefault(1))).ToArray();
+        var inputs = ordered.Select(row => (row.Source, row.SourceHash!, row.PageRotations.GetValueOrDefault(1),
+            row.PageAlignments.TryGetValue(1, out var alignment) ? (PageAlignment?)alignment : null)).ToArray();
         try { await Task.Run(() => PdfRenderer.MergePages(output, inputs)); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
         {
@@ -647,22 +648,28 @@ public sealed partial class MainViewModel : ObservableObject
                     Message = "Не удалось загрузить выбранный JSON. Проверьте файл или сбросьте шаблоны в настройках.";
                     return;
                 }
+                var savedPageAlignments = await Task.Run(Renamer.SavedPageAlignments, operation.Token);
                 var processed = 0;
                 for (var index = 0; index < batch.Length; index++)
                 {
                     operation.Token.ThrowIfCancellationRequested();
                     var row = batch[index];
-                    if (!force && row.Confirmed && row.ObserveVersion(await Task.Run(() => ReadVersion(row.Source))))
+                    var keepConfirmed = !force && row.Confirmed &&
+                        row.ObserveVersion(await Task.Run(() => ReadVersion(row.Source)));
+                    if (keepConfirmed && row.AvailableAlignments is not null)
                     {
                         Progress = 100d * (index + 1) / batch.Length;
                         continue;
                     }
                     Message = $"Анализ {index + 1} из {batch.Length} · {row.OriginalName}";
                     var result = await Task.Run(() => analyzer.Analyze(row.Source,
-                        options with { ReadSheetNumber = proposeMerges }, operation.Token));
+                        options with { ReadSheetNumber = proposeMerges, DetectPageAlignment = true,
+                            SavedPageAlignments = savedPageAlignments }, operation.Token));
                     if (requireReview && result.Status == RecognitionStatus.Ready)
                         result = result with { Status = RecognitionStatus.Review, Diagnostic = "Проверьте обе графы и подтвердите значения." };
-                    row.Apply(result);
+                    if (keepConfirmed && (result.SourceHash is null || result.SourceHash == row.SourceHash))
+                        row.SetAvailableAlignments(result.PageAlignments);
+                    else row.Apply(result);
                     processed++;
                     Progress = 100d * (index + 1) / batch.Length;
                 }
@@ -786,9 +793,12 @@ public sealed partial class MainViewModel : ObservableObject
                     individualFiles.Add(newPath);
                     if (row is not null)
                     {
-                        if (result.PageRotations is { Count: > 0 } rotations && result.ResultHash is { } hash)
-                            row.ApplySavedRotations(rotations, hash);
+                        var edited = result.ResultHash is not null &&
+                            (result.PageRotations?.Count > 0 || result.PageAlignments?.Count > 0);
+                        if (edited) row.ApplySavedPageEdits(result.PageRotations, result.PageAlignments, result.ResultHash!);
+                        var sameName = string.Equals(row.Source, newPath, StringComparison.Ordinal);
                         row.Source = newPath;
+                        if (edited && sameName) row.RefreshSavedPreview();
                     }
                 }
                 if (row is null) continue;

@@ -751,27 +751,54 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(90)]
-    public void SavedAlignmentLevelsContentAndPreservesPaperSizeAndOtherPages(int rotation)
+    [InlineData(0, false)]
+    [InlineData(90, false)]
+    [InlineData(0, true)]
+    public void RenameSavesAlignmentAndUndoRestoresUnmodifiedPdf(int rotation, bool sameName)
     {
         var renderer = new PdfRenderer();
         var source = Pdf(TiltedDrawingFrame(2.5, rotation), Sheet(842, 595, 0));
-        var destination = Path.Combine(folder, "aligned.pdf");
+        if (sameName)
+        {
+            var named = Path.Combine(folder, "ABCD.123456.001_Рама.pdf");
+            File.Move(source, named);
+            source = named;
+        }
+        var destination = Path.Combine(folder, "ABCD.123456.001_Рама.pdf");
+        var original = File.ReadAllBytes(source);
         var hash = RenameService.Hash(source);
-        using var input = File.OpenRead(source);
-        var alignment = Assert.IsType<PageAlignment>(renderer.FindPageAlignment(input, 1, null, default));
+        var otherPage = renderer.Render(source, 2, Area.Full, 640, default);
+        PageAlignment alignment;
+        (double Width, double Height) originalSize;
+        using (var input = File.OpenRead(source))
+        {
+            alignment = Assert.IsType<PageAlignment>(renderer.FindPageAlignment(input, 1, null, default));
+            originalSize = renderer.PageSize(input, 1, default);
+        }
         Assert.InRange(alignment.Angle, 2.35, 2.65);
 
-        PdfRenderer.SaveAlignedCopy(source, destination, hash, new Dictionary<int, (PageAlignment, int)> { [1] = (alignment, 0) });
-
-        using var output = File.OpenRead(destination);
-        Assert.Equal(2, renderer.CountPages(output, default));
-        Assert.Equal(renderer.PageSize(input, 1, default), renderer.PageSize(output, 1, default));
-        Assert.Equal(PageAlignment.Original, renderer.FindPageAlignment(output, 1, null, default));
-        Assert.Equal(renderer.Render(source, 2, Area.Full, 640, default).Pixels,
-            renderer.Render(destination, 2, Area.Full, 640, default).Pixels);
-        Assert.Equal(hash, RenameService.Hash(source));
+        var service = new RenameService(Path.Combine(folder, "history.json"));
+        var request = new RenameRequest(source, "ABCD.123456.001", "Рама")
+            { ExpectedHash = hash, PageAlignments = new Dictionary<int, PageAlignment> { [1] = alignment } };
+        var moved = Assert.Single(service.Execute([request]));
+        Assert.True(moved.Status == MoveStatus.Moved, moved.Message);
+        Assert.Equal(sameName, File.Exists(source));
+        using (var output = File.OpenRead(destination))
+        {
+            Assert.Equal(2, renderer.CountPages(output, default));
+            Assert.Equal(originalSize, renderer.PageSize(output, 1, default));
+            Assert.Equal(PageAlignment.Original, renderer.FindPageAlignment(output, 1, null, default));
+        }
+        Assert.Equal(otherPage.Pixels, renderer.Render(destination, 2, Area.Full, 640, default).Pixels);
+        var recorded = service.SavedPageAlignments();
+        Assert.Equal(new[] { 1 }, recorded[RenameService.Hash(destination)]);
+        Assert.False(recorded.ContainsKey(hash));
+        var reviewed = new DrawingAnalyzer().Analyze(destination,
+            new(false) { DetectPageAlignment = true, SavedPageAlignments = recorded }, default);
+        Assert.Equal(PageAlignment.Original, reviewed.PageAlignments![1]);
+        Assert.Equal(MoveStatus.Undone, Assert.Single(service.Undo()).Status);
+        Assert.Equal(original, File.ReadAllBytes(source));
+        Assert.Equal(sameName, File.Exists(destination));
     }
 
     [Fact]
@@ -790,16 +817,51 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public async Task RecognizeDetectsAlignmentForEachPageWithoutApplyingIt()
+    {
+        var source = Pdf(TiltedDrawingFrame(.22), TiltedDrawingFrame(0));
+        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { OcrEnabled = false };
+        await model.AddDocumentsAsync([source]);
+        var row = Assert.Single(model.Rows);
+        Assert.Null(row.AvailableAlignments);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+
+        Assert.NotNull(row.AvailableAlignments);
+        Assert.InRange(row.AvailableAlignments[1].Angle, .10, .34);
+        Assert.Equal(PageAlignment.Original, row.AvailableAlignments[2]);
+        Assert.Empty(row.PageAlignments);
+    }
+
+    [Fact]
+    public void MergeUsesThePageAlignmentInTheResultingPdf()
+    {
+        var renderer = new PdfRenderer();
+        var first = Pdf(TiltedDrawingFrame(2.5));
+        var second = Pdf(TiltedDrawingFrame(0));
+        var destination = Path.Combine(folder, "merged.pdf");
+        var hash = RenameService.Hash(first);
+        using (var source = File.OpenRead(first))
+        {
+            var alignment = renderer.FindPageAlignment(source, 1, null, default);
+            PdfRenderer.MergePages(destination, [(first, hash, 0, alignment), (second, RenameService.Hash(second), 0, null)]);
+        }
+        using var output = File.OpenRead(destination);
+        Assert.Equal(2, renderer.CountPages(output, default));
+        Assert.Equal(PageAlignment.Original, renderer.FindPageAlignment(output, 1, null, default));
+        Assert.Equal(hash, RenameService.Hash(first));
+    }
+
+    [Fact]
     public void AlignmentExportProtectsTheSourceAndExistingDestinationOnFailure()
     {
         var source = Pdf(TiltedDrawingFrame(2.5));
-        var destination = Path.Combine(folder, "existing.pdf");
+        var destination = Path.Combine(folder, "ABCD.123456.001_Рама.pdf");
         File.WriteAllText(destination, "existing content");
         var original = RenameService.Hash(source);
-        var pages = new Dictionary<int, (PageAlignment, int)> { [1] = (new(2.5, 1), 0) };
-
-        Assert.Throws<IOException>(() => PdfRenderer.SaveAlignedCopy(source, source, original, pages));
-        Assert.Throws<InvalidDataException>(() => PdfRenderer.SaveAlignedCopy(source, destination, "changed", pages));
+        var request = new RenameRequest(source, "ABCD.123456.001", "Рама")
+            { ExpectedHash = "changed", PageAlignments = new Dictionary<int, PageAlignment> { [1] = new(2.5, 1) } };
+        var service = new RenameService(Path.Combine(folder, "history.json"));
+        Assert.Equal(MoveStatus.Skipped, Assert.Single(service.Execute([request])).Status);
         Assert.Equal(original, RenameService.Hash(source));
         Assert.Equal("existing content", File.ReadAllText(destination));
         Assert.Empty(Directory.EnumerateFiles(folder, "*.tmp"));

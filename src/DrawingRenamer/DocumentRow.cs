@@ -61,12 +61,19 @@ public sealed partial class DocumentRow : ObservableObject
     public IReadOnlyList<Candidate> Candidates => Result?.Candidates ?? [];
     public Dictionary<int, int> PageRotations { get; } = [];
     internal Dictionary<int, PageAlignment> PageAlignments { get; } = [];
+    internal IReadOnlyDictionary<int, PageAlignment>? AvailableAlignments { get; private set; }
+    internal void SetAvailableAlignments(IReadOnlyDictionary<int, PageAlignment>? alignments)
+    {
+        AvailableAlignments = alignments;
+        OnPropertyChanged(nameof(AvailableAlignments));
+    }
     internal bool HasDocumentName => !string.IsNullOrWhiteSpace(NameForRename);
     public RenameRequest Request => new(Source, Designation, NameForRename)
     {
         Separator = Separator,
         ExpectedHash = SourceHash ?? throw new InvalidOperationException("Сначала подтвердите версию PDF."),
-        PageRotations = PageRotations.Count == 0 ? null : new Dictionary<int, int>(PageRotations)
+        PageRotations = PageRotations.Count == 0 ? null : new Dictionary<int, int>(PageRotations),
+        PageAlignments = PageAlignments.Count == 0 ? null : new Dictionary<int, PageAlignment>(PageAlignments)
     };
     public string? NameError
     {
@@ -92,6 +99,7 @@ public sealed partial class DocumentRow : ObservableObject
         SheetNumberText = "";
         SourceHash = result.SourceHash;
         Result = result;
+        SetAvailableAlignments(result.PageAlignments);
         SelectedCandidate = null;
         Designation = "";
         DocumentName = "";
@@ -137,16 +145,21 @@ public sealed partial class DocumentRow : ObservableObject
         return candidate.NameWithoutDocumentType is { Length: > 0 } name ? $"{label} - {name}" : label;
     }
 
-    public void ApplySavedRotations(IReadOnlyDictionary<int, int> rotations, string hash)
+    internal void ApplySavedPageEdits(IReadOnlyDictionary<int, int>? rotations,
+        IReadOnlyDictionary<int, PageAlignment>? alignments, string hash)
     {
         SourceHash = hash;
-        PageRotations.Clear();
-        if (Result is { } result) Result = result with { SourceHash = hash, Candidates = result.Candidates.Select(Rotate).ToArray() };
-        if (SelectedCandidate is { } selected) SelectedCandidate = Rotate(selected);
+        if (rotations is not null) PageRotations.Clear();
+        if (alignments is not null) PageAlignments.Clear();
+        SetAvailableAlignments(null);
+        if (Result is { } result) Result = result with { SourceHash = hash, PageAlignments = null,
+            Candidates = result.Candidates.Where(candidate => alignments?.ContainsKey(candidate.Page) != true).Select(Rotate).ToArray() };
+        if (SelectedCandidate is { } selected)
+            SelectedCandidate = alignments?.ContainsKey(selected.Page) == true ? null : Rotate(selected);
 
         Candidate Rotate(Candidate candidate)
         {
-            if (!rotations.TryGetValue(candidate.Page, out var turns)) return candidate;
+            if (rotations?.TryGetValue(candidate.Page, out var turns) != true) return candidate;
             var regions = candidate.Regions;
             return candidate with
             {
@@ -155,6 +168,8 @@ public sealed partial class DocumentRow : ObservableObject
             };
         }
     }
+
+    internal void RefreshSavedPreview() => OnPropertyChanged(nameof(Source));
 
     public bool ObserveVersion(string? hash)
     {

@@ -24,7 +24,6 @@ public sealed partial class MainWindow : Window
     public MainViewModel ViewModel { get; } = new();
     private readonly PdfRenderer renderer = new();
     private CancellationTokenSource? preview;
-    private CancellationTokenSource? deskew;
     private DocumentRow? current;
     private int page = 1;
     private int pageCount;
@@ -111,7 +110,6 @@ public sealed partial class MainWindow : Window
             scannerTimer.Stop();
             analysisTimer.Stop();
             preview?.Cancel();
-            deskew?.Cancel();
             ViewModel.CancelCommand.Execute(null);
         };
         UpdateCommands();
@@ -659,7 +657,12 @@ public sealed partial class MainWindow : Window
             RefreshCandidates();
             await SelectPageAsync(current?.SelectedCandidate?.Page ?? 1);
         }
-        if (e.PropertyName == nameof(DocumentRow.Source)) await SelectPageAsync(page);
+        if (e.PropertyName == nameof(DocumentRow.Source))
+        {
+            RefreshCandidates();
+            await SelectPageAsync(page);
+        }
+        if (e.PropertyName == nameof(DocumentRow.AvailableAlignments)) UpdateDeskewButton();
         if (e.PropertyName == nameof(DocumentRow.SheetNumberText)) UpdateCommands();
         if (e.PropertyName is nameof(DocumentRow.Designation) or nameof(DocumentRow.DocumentName) or nameof(DocumentRow.HasDocumentName))
             UpdateRegionGuidance();
@@ -695,7 +698,6 @@ public sealed partial class MainWindow : Window
     {
         if (closing) return;
         preview?.Cancel();
-        deskew?.Cancel();
         using var operation = new CancellationTokenSource();
         preview = operation;
         var row = current;
@@ -784,20 +786,22 @@ public sealed partial class MainWindow : Window
 
     private void UpdateDeskewButton()
     {
-        DeskewButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && deskew is null;
         var applied = current?.PageAlignments.ContainsKey(page) == true;
+        var suggestions = current?.AvailableAlignments;
+        var angle = suggestions?.GetValueOrDefault(page).Angle ?? 0;
+        DeskewButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && (applied || angle != 0);
         DeskewButton.IsChecked = applied;
         var label = applied ? "Отменить выравнивание листа" : "Выровнять лист";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DeskewButton, label);
-        ToolTipService.SetToolTip(DeskewButton, label);
-        SaveAlignedPdfButton.Visibility = current?.PageAlignments.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        SaveAlignedPdfButton.IsEnabled = DeskewButton.IsEnabled;
+        ToolTipService.SetToolTip(DeskewButton, applied ? label : angle != 0 ? $"Выровнять лист ({Math.Abs(angle):0.00}°)"
+            : suggestions is null ? "Сначала нажмите «Распознать»."
+            : suggestions.ContainsKey(page) ? "Лист уже выровнен." : "По рамке и штампу не удалось определить угол.");
     }
 
-    private async void ToggleDeskew(object sender, RoutedEventArgs e)
+    private void ToggleDeskew(object sender, RoutedEventArgs e)
     {
         if (current is not { } row || !CanChangeDocuments || PageImage.Source is null ||
-            dragStart.HasValue || deskew is not null)
+            dragStart.HasValue)
         {
             UpdateDeskewButton();
             return;
@@ -811,81 +815,16 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var number = page;
-        var source = row.Source;
-        var expectedHash = row.SourceHash;
-        using var operation = new CancellationTokenSource();
-        deskew = operation;
+        if (row.AvailableAlignments?.TryGetValue(page, out var alignment) == true && alignment.Angle != 0)
+        {
+            row.PageAlignments[page] = alignment;
+            UpdateSheetTransforms();
+            FitSheet();
+            var scale = alignment.Scale < 1 ? $" · Масштаб содержимого {alignment.Scale:P1}" : "";
+            var action = row.InMergeProposal ? "объединении" : "переименовании";
+            ViewModel.Message = $"Скан выровнен на {Math.Abs(alignment.Angle):0.00}°{scale} · Правка сохранится при {action}.";
+        }
         UpdateDeskewButton();
-        try
-        {
-            var options = await ViewModel.LoadRecognitionOptionsAsync(useDefaultsOnError: true);
-            var correction = await Task.Run(() =>
-            {
-                using var input = File.OpenRead(source);
-                if (RenameService.Hash(input) != expectedHash)
-                    throw new InvalidDataException("PDF изменился. Откройте лист заново.");
-                return renderer.FindPageAlignment(input, number, options.Templates, operation.Token);
-            }, operation.Token);
-            operation.Token.ThrowIfCancellationRequested();
-            if (correction is not { } alignment)
-                ViewModel.Message = "Не удалось определить наклон по рамке листа или штампа.";
-            else if (alignment.Angle == 0)
-                ViewModel.Message = "Лист уже выровнен.";
-            else
-            {
-                row.PageAlignments[number] = alignment;
-                UpdateSheetTransforms();
-                UpdateDeskewButton();
-                FitSheet();
-                var scale = alignment.Scale < 1 ? $" · Масштаб содержимого {alignment.Scale:P1}" : "";
-                ViewModel.Message = $"Скан выровнен на {Math.Abs(alignment.Angle):0.0}°{scale}.";
-            }
-        }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
-        {
-            if (!operation.IsCancellationRequested) ViewModel.Message = $"Не удалось выровнять лист. {ex.Message}";
-        }
-        finally
-        {
-            deskew = null;
-            if (!closing) UpdateDeskewButton();
-        }
-    }
-
-    private async void SaveAlignedPdf(object sender, RoutedEventArgs e)
-    {
-        if (!CanChangeDocuments || deskew is not null || current is not { SourceHash: { } hash } row ||
-            row.PageAlignments.Count == 0) return;
-        var source = row.Source;
-        var pages = row.PageAlignments.ToDictionary(item => item.Key,
-            item => (item.Value, row.PageRotations.GetValueOrDefault(item.Key)));
-        choosingDocuments = true;
-        UpdateCommands();
-        try
-        {
-            var picker = new FileSavePicker
-            {
-                SuggestedFileName = $"{Path.GetFileNameWithoutExtension(source)} (выровнено)",
-                SuggestedStartLocation = PickerLocationId.DocumentsLibrary
-            };
-            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-            picker.FileTypeChoices.Add("Документ PDF", [".pdf"]);
-            var file = await picker.PickSaveFileAsync();
-            if (file is null || closing) return;
-            await Task.Run(() => PdfRenderer.SaveAlignedCopy(source, file.Path, hash, pages));
-            if (!closing) ViewModel.Message = $"Сохранена выровненная копия PDF · {file.Path}";
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        {
-            if (!closing) ViewModel.Message = $"Не удалось сохранить выровненный PDF. {ex.Message}";
-        }
-        finally
-        {
-            choosingDocuments = false;
-            if (!closing) UpdateCommands();
-        }
     }
 
     private void ScrollPreviewHorizontally(object sender, PointerRoutedEventArgs e)
@@ -1009,7 +948,7 @@ public sealed partial class MainWindow : Window
 
     private void RegionPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (marking is null || ViewModel.Busy || choosingDocuments || deskew is not null) return;
+        if (marking is null || ViewModel.Busy || choosingDocuments) return;
         dragStart = dragEnd = PointerPosition(e);
         Sheet.CapturePointer(e.Pointer);
         e.Handled = true;
@@ -1229,10 +1168,15 @@ public sealed partial class MainWindow : Window
             if (closing) return;
             var pending = plans.Where(plan => plan.Status == MoveStatus.Pending).ToArray();
             var approved = pending.Select(plan => plan.Source).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var aligned = requests.Where(request => approved.Contains(request.Source))
+                .Sum(request => request.PageAlignments?.Count ?? 0);
             var skipped = plans.Where(plan => plan.Status == MoveStatus.Skipped).Concat(unconfirmed).ToArray();
             var summary = $"Будет обработано файлов: {pending.Length}. Будет пропущено: {skipped.Length}.";
+            if (aligned > 0) summary += $" Будет сохранено выравнивание листов: {aligned}.";
             var details = skipped.Select(plan => $"{Path.GetFileName(plan.Source)}\n{plan.Message}")
-                .Concat(pending.Select(plan => $"{Path.GetFileName(plan.Source)} → {Path.GetFileName(plan.Target)}"));
+                .Concat(pending.Select(plan => string.Equals(plan.Source, plan.Target, StringComparison.OrdinalIgnoreCase)
+                    ? $"{Path.GetFileName(plan.Source)}\nСохранить выравнивание в этом PDF."
+                    : $"{Path.GetFileName(plan.Source)} → {Path.GetFileName(plan.Target)}"));
             var location = destination is null ? "Сохранение в исходных папках." : $"Папка назначения\n{destination}";
             var message = $"{location}\n\n{summary}\n\n" + string.Join("\n\n", details);
             if (pickerError is not null) message = $"{pickerError}\n\n{message}";
@@ -1298,7 +1242,7 @@ public sealed partial class MainWindow : Window
     {
         if (!CanChangeDocuments || !ViewModel.CanUndo) return;
         if (await ConfirmDialog("Отменить последнюю операцию",
-            "Перемещённые PDF вернутся в исходные папки с прежними именами и ориентацией. Созданные копии будут удалены, если исходные PDF и копии не изменились.",
+            "Будут восстановлены исходные файлы, имена и ориентация листов. Созданные копии будут удалены, если исходные PDF и копии не изменились.",
             "Отменить операцию"))
             await ViewModel.MoveAsync(null);
     }

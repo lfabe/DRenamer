@@ -6,7 +6,7 @@ public readonly record struct PageAlignment(double Angle, double Scale)
 
     internal static PageAlignment ForScan(Raster raster, double angle, CancellationToken token)
     {
-        if (Math.Abs(angle) < .15) return Original;
+        if (Math.Abs(angle) < .08) return Original;
         var (width, height) = (raster.Width, raster.Height);
         var (sin, cos) = Math.SinCos(angle * Math.PI / 180);
         for (var y = 0; y < height; y++)
