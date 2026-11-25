@@ -14,6 +14,8 @@ public sealed class SettingsTests : IDisposable
         first.SetTemplates(templatePath);
         first.SetScannerFolder(folder);
         first.ScannerWatchEnabled = true;
+        first.ScannerCreatedAfter = DateTimeOffset.Now.AddHours(-3);
+        first.SplitScanBatches = true;
         await first.SaveSettingsAsync();
         Assert.True(File.Exists(SettingsFile));
 
@@ -27,6 +29,8 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(templatePath, restored.TemplatePath);
         Assert.Equal(folder, restored.ScannerFolderLabel);
         Assert.True(restored.ScannerWatchEnabled);
+        Assert.Equal(first.ScannerCreatedAfter, restored.ScannerCreatedAfter);
+        Assert.True(restored.SplitScanBatches);
         Assert.Contains("Saved template", (await restored.LoadRecognitionOptionsAsync()).Templates!.Select(t => t.Name));
     }
 

@@ -29,6 +29,21 @@ def scan(output):
     draw.text((738, 2010), "Корпус", font=font, fill="black")
     draw.text((738, 2084), "основной", font=font, fill="black")
     image.save(output / "scan-form1.pdf", resolution=200)
+    numbered = image.copy()
+    title = ImageDraw.Draw(numbered)
+    title.line((1218, 2182, 1611, 2182), fill="black", width=4)
+    title.line((1375, 2143, 1375, 2182), fill="black", width=4)
+    title.text((1315, 2145), "1", font=ImageFont.truetype(FONT, 31), fill="black")
+    continuation = Image.new("RGB", image.size, "white")
+    stamp = ImageDraw.Draw(continuation)
+    stamp.rectangle((left, 2182, right, bottom), outline="black", width=4)
+    for x in (668, 1532):
+        stamp.line((x, 2182, x, bottom), fill="black", width=4)
+    for y in (2221, 2260):
+        stamp.line((left, y, 668, y), fill="black", width=4)
+    stamp.text((780, 2206), "АБВГ.123456.001", font=font, fill="black")
+    stamp.text((1554, 2228), "2", font=ImageFont.truetype(FONT, 44), fill="black")
+    continuation.save(output / "scan-numbered-batch.pdf", resolution=200, save_all=True, append_images=[numbered])
     # A clipped bottom rule and a tilted, sideways scan with text in both cells.
     draw.rectangle((690, 1880, 1590, 1970), fill="white")
     draw.text((780, 1894), "АБВГ.123456-02", font=font, fill="black")

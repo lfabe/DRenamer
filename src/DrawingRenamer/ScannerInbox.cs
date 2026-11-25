@@ -2,12 +2,16 @@ namespace DrawingRenamer;
 
 internal sealed class ScannerInbox(string folder)
 {
-    private readonly record struct FileVersion(long Length, DateTime LastWriteTimeUtc);
+    internal readonly record struct FileVersion(long Length, DateTime LastWriteTimeUtc, DateTime CreationTimeUtc)
+    {
+        internal FileVersion(FileInfo file) : this(file.Length, file.LastWriteTimeUtc, file.CreationTimeUtc) { }
+    }
 
     private Dictionary<string, FileVersion> previous = new(StringComparer.OrdinalIgnoreCase);
     internal string Folder { get; } = folder;
 
-    internal string[] FindReadyFiles(IReadOnlySet<string> ignored)
+    internal string[] FindReadyFiles(IReadOnlySet<string> ignored, DateTime? createdAfterUtc,
+        IReadOnlyDictionary<string, FileVersion>? handledBatches)
     {
         var current = new Dictionary<string, FileVersion>(StringComparer.OrdinalIgnoreCase);
         var ready = new List<string>();
@@ -19,9 +23,9 @@ internal sealed class ScannerInbox(string folder)
                 if (ignored.Contains(path)) continue;
                 try
                 {
-                    var file = new FileInfo(path);
-                    var version = new FileVersion(file.Length, file.LastWriteTimeUtc);
-                    if (version.Length == 0) continue;
+                    var version = new FileVersion(new FileInfo(path));
+                    if (version.Length == 0 || version.CreationTimeUtc < createdAfterUtc ||
+                        (handledBatches?.TryGetValue(path, out var handled) == true && version == handled)) continue;
                     current[path] = version;
 
                     // Wait for an unchanged observation and for the scanner to release any write handle.

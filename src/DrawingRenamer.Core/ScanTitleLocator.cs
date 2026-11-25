@@ -1,10 +1,11 @@
 namespace DrawingRenamer;
 
-internal sealed record ScanTitle(FieldRegions Regions, int Turn, double Slope, IReadOnlyList<Area> NameLines, TitleTemplate Template)
+internal sealed record ScanTitle(FieldRegions Regions, int Turn, double Slope, IReadOnlyList<Area> NameLines,
+    TitleTemplate Template, Area? NameWithDescenders)
 {
     internal ScanTitle OnOriginalPage(int turn) => new(new(Regions.Designation.Rotate(-turn),
         Regions.Name.Rotate(-turn), Regions.TitleBlock?.Rotate(-turn)), turn, Slope,
-        NameLines.Select(line => line.Rotate(-turn)).ToArray(), Template);
+        NameLines.Select(line => line.Rotate(-turn)).ToArray(), Template, NameWithDescenders?.Rotate(-turn));
 }
 
 internal sealed class ScanTitleLocator(Raster raster, int turn)
@@ -72,13 +73,13 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
                 if (template == TitleTemplate.ConstructionWorkingDrawing &&
                     !HasRule(grid, template.Title.X, template.Title.Y, 1, template.Title.Y)) continue;
 
-                var designation = FitText(grid, template.Designation, null);
+                var designation = FitText(grid, template.Designation, null, out _);
                 if (!designation.IsValid) continue;
                 var lines = new List<Area>();
-                var name = FitText(grid, template.Title, lines);
+                var name = FitText(grid, template.Title, lines, out var nameWithDescenders);
                 if (!name.IsValid) continue;
                 var frame = grid.Bounds(width, height).Rotate(-turn);
-                yield return new(new(designation, name, frame), turn, slope, lines, template);
+                yield return new(new(designation, name, frame), turn, slope, lines, template, nameWithDescenders);
             }
         }
     }
@@ -108,8 +109,9 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
         return hits >= 16;
     }
 
-    private Area FitText(Grid grid, Area field, List<Area>? lines)
+    private Area FitText(Grid grid, Area field, List<Area>? lines, out Area? extended)
     {
+        extended = null;
         var w = (int)Math.Round(field.Width * grid.Width);
         var h = (int)Math.Round(field.Height * grid.Height);
         if (w < 8 || h < 8) return default;
@@ -151,6 +153,11 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
                 }
                 first = last;
             }
+            // Keep sparse descenders connected to the text, without extending into separate marks below it.
+            var bottom = maxY;
+            var limit = Math.Min(h - 2, maxY + Math.Max(1, (maxY - minY + 1) / 5));
+            while (bottom < limit && HasConnectedInk(bottom, minX, maxX)) bottom++;
+            if (bottom > maxY) extended = Box(minY, bottom, minX, maxX);
         }
         return Box(minY, maxY, minX, maxX);
 
@@ -165,6 +172,15 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
             var cy = origin.Y + (y1 + y2 + grid.Slope * (x1 + x2)) / 2;
             return new Area((cx - (x2 - x1) / 2d) / width, (cy - (y2 - y1) / 2d) / height,
                 (x2 - x1) / (double)width, (y2 - y1) / (double)height).Rotate(-turn);
+        }
+
+        bool HasConnectedInk(int y, int from, int to)
+        {
+            var current = y * w;
+            var next = current + w;
+            for (var x = Math.Max(1, from); x <= Math.Min(w - 2, to); x++)
+                if (ink[next + x] && (ink[current + x - 1] || ink[current + x] || ink[current + x + 1])) return true;
+            return false;
         }
     }
 

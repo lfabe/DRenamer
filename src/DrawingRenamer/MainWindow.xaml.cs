@@ -1,7 +1,10 @@
 using System.ComponentModel;
+using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -37,14 +40,32 @@ public sealed partial class MainWindow : Window
     private bool choosingDocuments;
     private bool refreshingCandidates;
     private bool settingsLoaded;
+    private bool syncingScannerCutoff;
+    private bool refreshingDocumentRows;
+    private readonly ObservableCollection<DocumentRow> visibleRows = [];
+    private readonly Dictionary<string, DocumentRow> mergeHeaders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<DocumentRow> animatingGroups = [];
+    private readonly HashSet<DocumentRow> pendingGroupToggles = [];
+    private readonly Windows.UI.ViewManagement.UISettings uiSettings = new();
+    private bool updatingAllChecks;
+    private Border? movingHeader;
+    private DocumentRow? queueDragSource;
+    private DocumentRow? queueDropTarget;
+    private Windows.Foundation.Point queueDragStart;
+    private uint queuePointerId;
+    private DocumentRow[] draggedQueueRows = [];
     private bool CanChangeDocuments => !closing && !ViewModel.Busy && !renaming && !choosingDocuments;
-    private int PreviewTurn => (int)SheetRotation.Angle / 90;
+    private int PreviewTurn => current?.PageRotations.GetValueOrDefault(page) ?? 0;
+    private PageAlignment Alignment => current?.PageAlignments.GetValueOrDefault(page, PageAlignment.Original)
+        ?? PageAlignment.Original;
     private int RegionTurn => (PreviewTurn + Orientation.SelectedIndex) & 3;
     private double RegionStrokeThickness => 1.25 / PreviewScroll.ZoomFactor;
 
     public MainWindow()
     {
         InitializeComponent();
+        Documents.ItemsSource = visibleRows;
+        UpdateScannerCutoff();
         ApplyTheme();
         PreviewScroll.ViewChanged += (_, _) =>
         {
@@ -54,13 +75,20 @@ public sealed partial class MainWindow : Window
         };
         Root.AddHandler(UIElement.DragOverEvent, new DragEventHandler(DocumentsDragOver), true);
         Root.AddHandler(UIElement.DropEvent, new DragEventHandler(DocumentsDropped), true);
+        Root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(QueuePointerPressed), true);
+        Root.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(QueuePointerMoved), true);
+        Root.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(QueuePointerReleased), true);
+        Root.AddHandler(UIElement.PointerCaptureLostEvent, new PointerEventHandler(QueueCaptureLost), true);
         var version = typeof(MainWindow).Assembly.GetName().Version;
         Title = version is null ? "Drawing Renamer" : $"Drawing Renamer v{version.ToString(3)}";
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "DrawingRenamer.ico"));
         AppWindow.Resize(new(1320, 820));
         ViewModel.PropertyChanged += ViewModelChanged;
         ViewModel.AnalyzeCommand.PropertyChanged += (_, _) => UpdateCommands();
-        ViewModel.Rows.CollectionChanged += (_, _) => UpdateCommands();
+        ViewModel.Rows.CollectionChanged += QueueRowsChanged;
+        var analysisTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        analysisTimer.Tick += (_, _) => UpdateAnalysisClock();
+        analysisTimer.Start();
         var scannerTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         scannerTimer.Tick += async (_, _) => await ViewModel.CheckScannerFolderAsync(() => CanChangeDocuments);
         scannerTimer.Start();
@@ -80,6 +108,7 @@ public sealed partial class MainWindow : Window
         {
             closing = true;
             scannerTimer.Stop();
+            analysisTimer.Stop();
             preview?.Cancel();
             ViewModel.CancelCommand.Execute(null);
         };
@@ -91,6 +120,36 @@ public sealed partial class MainWindow : Window
         if (e.PropertyName is nameof(ViewModel.Busy) or nameof(ViewModel.SeparatorError)) UpdateCommands();
         if (e.PropertyName == nameof(ViewModel.ThemeIndex)) ApplyTheme();
         if (e.PropertyName == nameof(ViewModel.Recursive)) await RefreshDocumentsAsync();
+        if (e.PropertyName == nameof(ViewModel.ScannerCreatedAfter)) UpdateScannerCutoff();
+        if (e.PropertyName == nameof(ViewModel.MergeProposals)) RefreshDocumentRows();
+        if (e.PropertyName == nameof(ViewModel.Message)) UpdateAnalysisClock();
+    }
+
+    private void UpdateAnalysisClock() => AnalysisClockText.Text = ViewModel.IsAnalyzing &&
+        ViewModel.Message.StartsWith("Анализ ", StringComparison.Ordinal) ? $" · {ViewModel.AnalysisElapsed}" : "";
+
+    private void QueueRowsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.OldItems is not null)
+            foreach (DocumentRow row in e.OldItems) row.PropertyChanged -= QueueRowChanged;
+        if (e.NewItems is not null)
+            foreach (DocumentRow row in e.NewItems) row.PropertyChanged += QueueRowChanged;
+        RefreshDocumentRows();
+    }
+
+    private void QueueRowChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(DocumentRow.Included) && !updatingAllChecks) UpdateCommands();
+    }
+
+    private void ToggleAllFiles(object sender, RoutedEventArgs e)
+    {
+        if (!CanChangeDocuments) return;
+        var include = !ViewModel.Rows.All(row => row.Included);
+        updatingAllChecks = true;
+        try { foreach (var row in ViewModel.Rows) row.Included = include; }
+        finally { updatingAllChecks = false; }
+        UpdateCommands();
     }
 
     private async void RefreshDocuments(object sender, RoutedEventArgs e) => await RefreshDocumentsAsync();
@@ -105,10 +164,15 @@ public sealed partial class MainWindow : Window
         AddFolderButton.IsEnabled = available;
         RecursiveCheckBox.IsEnabled = available;
         RefreshButton.IsEnabled = available && ViewModel.HasDocumentSources;
-        AnalyzeButton.IsEnabled = available && ViewModel.Rows.Count > 0;
-        ConfirmButton.IsEnabled = available && Documents.SelectedItems.Count > 0;
+        var included = ViewModel.Rows.Count(row => row.Included);
+        AllFilesCheckBox.IsEnabled = available && ViewModel.Rows.Count > 0;
+        AllFilesCheckBox.IsChecked = included == 0 ? false : included == ViewModel.Rows.Count ? true : null;
+        AnalyzeButton.IsEnabled = available && included > 0;
+        ConfirmButton.IsEnabled = available && included > 0;
+        foreach (var header in mergeHeaders.Values)
+            header.MergeEnabled = available && ViewModel.SeparatorError is null && header.MergeProposal?.CanMerge == true;
         CancelButton.Visibility = ViewModel.Busy && ViewModel.IsAnalyzing ? Visibility.Visible : Visibility.Collapsed;
-        RenameButton.IsEnabled = available && ViewModel.Rows.Count > 0 && ViewModel.SeparatorError is null;
+        RenameButton.IsEnabled = available && ViewModel.Rows.Any(row => !row.InMergeProposal) && ViewModel.SeparatorError is null;
         SeparatorInput.IsEnabled = available;
         SettingsContainer.IsEnabled = available;
         SaveSettingsButton.IsEnabled = available && ViewModel.SeparatorError is null;
@@ -117,10 +181,87 @@ public sealed partial class MainWindow : Window
         Documents.IsEnabled = available;
         RotateLeftButton.IsEnabled = RotateRightButton.IsEnabled = available && PageImage.Source is not null;
         FitPageButton.IsEnabled = PageImage.Source is not null;
+        FitStampButton.IsEnabled = PageImage.Source is not null && CurrentStamp is { IsValid: true };
+        UpdateDeskewButton();
         ToggleRegionsButton.IsEnabled = StartManualRegionsButton.IsEnabled = available;
         MarkDesignationButton.IsEnabled = MarkNameButton.IsEnabled = MarkStampButton.IsEnabled = available;
         ReadRegionsButton.IsEnabled = SaveRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
         EmptyQueue.Visibility = ViewModel.Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private QueueColumns FileQueueColumns => (QueueColumns)Root.Resources["FileQueueColumns"];
+
+    private void QueueSizeChanged(object sender, SizeChangedEventArgs e) => FileQueueColumns.Fit(e.NewSize.Width - 2);
+
+    private void ResizeQueueColumn(object sender, DragDeltaEventArgs e)
+    {
+        if (sender is Thumb { Tag: string column }) FileQueueColumns.Resize(column, e.HorizontalChange);
+    }
+
+    private void ResizeQueueColumnKey(object sender, KeyRoutedEventArgs e)
+    {
+        var change = e.Key switch { Windows.System.VirtualKey.Left => -12, Windows.System.VirtualKey.Right => 12, _ => 0 };
+        if (change == 0 || sender is not Thumb { Tag: string column }) return;
+        FileQueueColumns.Resize(column, change);
+        e.Handled = true;
+    }
+
+    private void BeginColumnMove(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not Border header ||
+            !e.GetCurrentPoint(header).Properties.IsLeftButtonPressed || !header.CapturePointer(e.Pointer)) return;
+        movingHeader = header;
+        e.Handled = true;
+    }
+
+    private void TrackColumnMove(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not Border { Tag: string column } header || header != movingHeader) return;
+        var from = FileQueueColumns.IndexOf(column);
+        var target = FileQueueColumns.DropIndex(column, e.GetCurrentPoint(QueueHeader).Position.X);
+        ColumnMoveGuide.Visibility = from == target ? Visibility.Collapsed : Visibility.Visible;
+        Canvas.SetLeft(ColumnMoveGuide, FileQueueColumns.DropGuide(from, target));
+        e.Handled = true;
+    }
+
+    private void FinishColumnMove(object sender, PointerRoutedEventArgs e)
+    {
+        if (sender is not Border { Tag: string column } header || header != movingHeader) return;
+        var target = FileQueueColumns.DropIndex(column, e.GetCurrentPoint(QueueHeader).Position.X);
+        CancelColumnMove(header, e);
+        header.ReleasePointerCapture(e.Pointer);
+        FileQueueColumns.Move(column, target);
+        e.Handled = true;
+    }
+
+    private void CancelColumnMove(object sender, PointerRoutedEventArgs e)
+    {
+        if (!ReferenceEquals(movingHeader, sender)) return;
+        movingHeader = null;
+        ColumnMoveGuide.Visibility = Visibility.Collapsed;
+    }
+
+    private void AutoFitQueueColumn(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (sender is not Thumb { Tag: string column }) return;
+        var (label, values) = column switch
+        {
+            nameof(QueueColumns.Source) => ("Исходное имя", ViewModel.Rows.Select(row => row.InMergeProposal ? "    " + row.OriginalName : row.OriginalName)),
+            nameof(QueueColumns.Designation) => ("Обозначение", ViewModel.Rows.Select(row => row.Designation)),
+            nameof(QueueColumns.Title) => ("Наименование", ViewModel.Rows.Select(row => row.DocumentName)),
+            nameof(QueueColumns.Sheet) => ("Лист", ViewModel.Rows.Select(row => row.SheetNumberText)),
+            nameof(QueueColumns.Target) => ("Новое имя", ViewModel.Rows.Select(row => row.QueueNewName)),
+            _ => ("Статус", ViewModel.Rows.Select(row => row.QueueStatus).Append("Объединить"))
+        };
+        var measure = new TextBlock { FontSize = 14 };
+        var width = values.Append(label).Distinct().Max(value =>
+        {
+            measure.Text = value;
+            measure.Measure(new(double.PositiveInfinity, double.PositiveInfinity));
+            return measure.DesiredSize.Width;
+        }) + 16;
+        FileQueueColumns.Resize(column, width - FileQueueColumns.WidthOf(column).Value);
+        e.Handled = true;
     }
 
     private FileOpenPicker FilePicker(string extension)
@@ -170,6 +311,85 @@ public sealed partial class MainWindow : Window
         e.AcceptedOperation = CanChangeDocuments ? DataPackageOperation.Copy : DataPackageOperation.None;
         if (CanChangeDocuments) e.DragUIOverride.Caption = "Добавить PDF и папки";
         e.Handled = true;
+    }
+
+    private DocumentRow? QueueRowAt(PointerRoutedEventArgs e) =>
+        VisualTreeHelper.FindElementsInHostCoordinates(e.GetCurrentPoint(null).Position, Documents)
+            .OfType<ListViewItem>().Select(item => Documents.ItemFromContainer(item) as DocumentRow)
+            .FirstOrDefault(row => row is not null);
+
+    private void QueuePointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (!CanChangeDocuments || ViewModel.MergeProposals.Count == 0 ||
+            e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse) return;
+        var point = e.GetCurrentPoint(Root);
+        if (!point.Properties.IsLeftButtonPressed || QueueRowAt(e) is not { IsFile: true, InMergeProposal: false } row) return;
+        for (var element = e.OriginalSource as DependencyObject; element is not null && element is not ListViewItem;
+            element = VisualTreeHelper.GetParent(element))
+            if (element is ButtonBase) return;
+        queueDragSource = row;
+        queueDragStart = point.Position;
+        queuePointerId = e.Pointer.PointerId;
+    }
+
+    private void QueuePointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (queueDragSource is not { } row || e.Pointer.PointerId != queuePointerId) return;
+        var point = e.GetCurrentPoint(Root);
+        if (!CanChangeDocuments || !point.Properties.IsLeftButtonPressed)
+        {
+            ClearQueueDrag();
+            return;
+        }
+        if (draggedQueueRows.Length == 0)
+        {
+            if (Math.Abs(point.Position.X - queueDragStart.X) < 6 && Math.Abs(point.Position.Y - queueDragStart.Y) < 6) return;
+            draggedQueueRows = Documents.SelectedItems.Contains(row)
+                ? Documents.SelectedItems.OfType<DocumentRow>().Where(item => item.IsFile && !item.InMergeProposal).ToArray()
+                : [row];
+            Root.CapturePointer(e.Pointer);
+        }
+        HighlightQueueDrop(QueueRowAt(e) is { IsMergeHeader: true } header ? header : null);
+        e.Handled = true;
+    }
+
+    private async void QueuePointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (queueDragSource is null || e.Pointer.PointerId != queuePointerId) return;
+        var pages = draggedQueueRows;
+        var target = pages.Length > 0 ? QueueRowAt(e) : null;
+        ClearQueueDrag();
+        if (pages.Length == 0) return;
+        Root.ReleasePointerCapture(e.Pointer);
+        e.Handled = true;
+        if (!CanChangeDocuments || target is not { MergeProposal: { } proposal }) return;
+        await ViewModel.AttachMergePagesAsync(proposal, pages);
+        if (!closing) RefreshDocumentRows(target);
+    }
+
+    private void QueueCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (ReferenceEquals(e.OriginalSource, Root)) ClearQueueDrag();
+    }
+
+    private void ClearQueueDrag()
+    {
+        queueDragSource = null;
+        draggedQueueRows = [];
+        HighlightQueueDrop(null);
+    }
+
+    private void HighlightQueueDrop(DocumentRow? target)
+    {
+        if (ReferenceEquals(queueDropTarget, target)) return;
+        if (queueDropTarget is not null) queueDropTarget.IsQueueDropTarget = false;
+        queueDropTarget = target;
+        if (target is not null) target.IsQueueDropTarget = true;
+    }
+
+    private void DetachMergePage(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments && sender is MenuFlyoutItem { Tag: DocumentRow row }) ViewModel.DetachMergePage(row);
     }
 
     private async void DocumentsDropped(object sender, DragEventArgs e)
@@ -235,6 +455,29 @@ public sealed partial class MainWindow : Window
         if (CanChangeDocuments) await ViewModel.ResetSettingsAsync();
     }
 
+    private void UpdateScannerCutoff()
+    {
+        syncingScannerCutoff = true;
+        try
+        {
+            ScannerStartDatePicker.Date = ViewModel.ScannerStartDate;
+            ScannerStartTimePicker.Time = ViewModel.ScannerStartTime;
+        }
+        finally { syncingScannerCutoff = false; }
+    }
+
+    private void ScannerStartDateChanged(CalendarDatePicker sender, CalendarDatePickerDateChangedEventArgs e)
+    {
+        if (syncingScannerCutoff) return;
+        if (e.NewDate is { } date) ViewModel.ScannerStartDate = date;
+        else UpdateScannerCutoff();
+    }
+
+    private void ScannerStartTimeChanged(object sender, TimePickerValueChangedEventArgs e)
+    {
+        if (!syncingScannerCutoff) ViewModel.ScannerStartTime = e.NewTime;
+    }
+
     private void ApplyTheme() => Root.RequestedTheme = ViewModel.ThemeIndex switch
     {
         1 => ElementTheme.Light,
@@ -248,10 +491,16 @@ public sealed partial class MainWindow : Window
             await ViewModel.AnalyzeDocumentAsync(row);
     }
 
+    private async void SplitFromMenu(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments && sender is MenuFlyoutItem { Tag: DocumentRow { IsFile: true } row })
+            await ViewModel.SplitDocumentAsync(row);
+    }
+
     private void RemoveDocumentFromMenu(object sender, RoutedEventArgs e)
     {
         if (CanChangeDocuments && sender is MenuFlyoutItem { Tag: DocumentRow row })
-            ViewModel.RemoveDocuments(Documents.SelectedItems.Contains(row)
+            ViewModel.RemoveDocuments(row.IsFile && Documents.SelectedItems.Contains(row)
                 ? Documents.SelectedItems.OfType<DocumentRow>() : [row]);
     }
 
@@ -264,16 +513,139 @@ public sealed partial class MainWindow : Window
         Documents.Focus(FocusState.Keyboard);
     }
 
+    private MergeProposal? SelectedMergeGroup()
+    {
+        if (Documents.SelectedItem is not DocumentRow selected) return null;
+        return selected.MergeProposal ?? ViewModel.MergeProposals.FirstOrDefault(proposal => proposal.Pages.Contains(selected));
+    }
+
+    private async void RefreshDocumentRows(DocumentRow? preferred = null)
+    {
+        if (refreshingDocumentRows) return;
+        var selected = preferred ?? Documents.SelectedItem as DocumentRow ?? ViewModel.Selected;
+        var wasFlat = mergeHeaders.Count == 0;
+        var activeKeys = ViewModel.MergeProposals.Select(proposal => proposal.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in mergeHeaders.Keys.Where(key => !activeKeys.Contains(key)).ToArray()) mergeHeaders.Remove(key);
+        var members = new Dictionary<DocumentRow, MergeProposal>();
+        foreach (var proposal in ViewModel.MergeProposals)
+            foreach (var row in proposal.Pages) members[row] = proposal;
+        var addedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var actualRows = ViewModel.Rows.ToHashSet();
+        var visible = new List<DocumentRow>();
+        foreach (var row in ViewModel.Rows)
+        {
+            if (!members.TryGetValue(row, out var proposal))
+            {
+                visible.Add(row);
+                continue;
+            }
+            if (!addedHeaders.Add(proposal.Key)) continue;
+            if (!mergeHeaders.TryGetValue(proposal.Key, out var header))
+            {
+                header = new DocumentRow(proposal.Label) { MergeProposal = proposal, MergeExpanded = true };
+                mergeHeaders.Add(proposal.Key, header);
+            }
+            header.UpdateMergeHeader(proposal);
+            visible.Add(header);
+            if (!header.MergeExpanded) continue;
+            var pages = proposal.Ordered.Where(actualRows.Contains).ToArray();
+            for (var i = 0; i < pages.Length; i++)
+            {
+                pages[i].IsGroupTail = i == pages.Length - 1;
+                visible.Add(pages[i]);
+            }
+        }
+
+        var visibleSet = visible.ToHashSet();
+        var next = selected is not null && visibleSet.Contains(selected) ? selected : null;
+        if ((next is null || (wasFlat && Documents.SelectedItems.Count < 2)) && selected is not null &&
+            members.TryGetValue(selected, out var selectedGroup))
+            mergeHeaders.TryGetValue(selectedGroup.Key, out next);
+        refreshingDocumentRows = true;
+        try
+        {
+            // Update the same ItemsSource so WinUI keeps the scroll anchor and animates only changed rows.
+            if (next is not null && visibleRows.Contains(next) && !ReferenceEquals(Documents.SelectedItem, next))
+                Documents.SelectedItem = next;
+            for (var i = visibleRows.Count - 1; i >= 0; i--)
+                if (!visibleSet.Contains(visibleRows[i])) visibleRows.RemoveAt(i);
+            for (var i = 0; i < visible.Count; i++)
+            {
+                if (i < visibleRows.Count && ReferenceEquals(visibleRows[i], visible[i])) continue;
+                var oldIndex = visibleRows.IndexOf(visible[i]);
+                if (oldIndex >= 0) visibleRows.Move(oldIndex, i);
+                else visibleRows.Insert(i, visible[i]);
+            }
+            next ??= visible.FirstOrDefault();
+            if (!ReferenceEquals(Documents.SelectedItem, next)) Documents.SelectedItem = next;
+        }
+        finally { refreshingDocumentRows = false; }
+        await UpdateDocumentSelectionAsync();
+    }
+
+    private async void ToggleMergeGroup(object sender, RoutedEventArgs e)
+    {
+        if (!CanChangeDocuments || sender is not Button { Tag: DocumentRow { IsMergeHeader: true } header }) return;
+        if (!animatingGroups.Add(header))
+        {
+            if (!pendingGroupToggles.Add(header)) pendingGroupToggles.Remove(header);
+            return;
+        }
+        try
+        {
+            do
+            {
+                if (!CanChangeDocuments || !visibleRows.Contains(header)) break;
+                header.MergeExpanded = !header.MergeExpanded;
+                RefreshDocumentRows(header);
+                if (uiSettings.AnimationsEnabled) await Task.Delay(300);
+            } while (pendingGroupToggles.Remove(header));
+        }
+        finally
+        {
+            pendingGroupToggles.Remove(header);
+            animatingGroups.Remove(header);
+        }
+    }
+
+    private async void MergeSelected(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments && sender is Button { Tag: DocumentRow { MergeProposal: { } proposal } })
+            await ViewModel.MergeAsync(proposal);
+    }
+
+    private void MergeFieldsChanged(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments && current?.MergeEligible == true) ViewModel.RefreshMergeProposals();
+    }
+
     private async void SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!refreshingDocumentRows) await UpdateDocumentSelectionAsync();
+    }
+
+    private async Task UpdateDocumentSelectionAsync()
     {
         UpdateCommands();
         var selected = Documents.SelectedItem as DocumentRow;
+        var group = SelectedMergeGroup();
+        MergeDetails.Visibility = group is null ? Visibility.Collapsed : Visibility.Visible;
+        if (group is not null)
+        {
+            MergeOrder.Text = string.Join(Environment.NewLine, group.Ordered.Select(row =>
+                $"Лист {row.SheetNumber?.ToString() ?? "—"}   {row.OriginalName}"));
+            MergeDestination.Text = $"Итоговый файл: {group.Label}";
+        }
+        SheetNumberInput.Visibility = selected is { IsFile: true, MergeEligible: true } ? Visibility.Visible : Visibility.Collapsed;
+        Editor.Visibility = selected is { IsFile: true } ? Visibility.Visible : Visibility.Collapsed;
+        RegionControls.Visibility = PageImage.Source is not null ? Editor.Visibility : Visibility.Collapsed;
+        UpdateRegionGuidance();
+        if (selected is { IsMergeHeader: true }) selected = group?.Ordered.FirstOrDefault();
         if (current == selected) return;
         if (current is not null) current.PropertyChanged -= RowChanged;
         current = selected;
         if (current is not null) current.PropertyChanged += RowChanged;
         Editor.DataContext = current;
-        Editor.Visibility = current is null ? Visibility.Collapsed : Visibility.Visible;
         RefreshCandidates();
         await SelectPageAsync(current?.SelectedCandidate?.Page ?? 1);
     }
@@ -285,7 +657,13 @@ public sealed partial class MainWindow : Window
             RefreshCandidates();
             await SelectPageAsync(current?.SelectedCandidate?.Page ?? 1);
         }
-        if (e.PropertyName == nameof(DocumentRow.Source)) await SelectPageAsync(page);
+        if (e.PropertyName == nameof(DocumentRow.Source))
+        {
+            RefreshCandidates();
+            await SelectPageAsync(page);
+        }
+        if (e.PropertyName == nameof(DocumentRow.AvailableAlignments)) UpdateDeskewButton();
+        if (e.PropertyName == nameof(DocumentRow.SheetNumberText)) UpdateCommands();
         if (e.PropertyName is nameof(DocumentRow.Designation) or nameof(DocumentRow.DocumentName) or nameof(DocumentRow.HasDocumentName))
             UpdateRegionGuidance();
     }
@@ -324,7 +702,6 @@ public sealed partial class MainWindow : Window
         preview = operation;
         var row = current;
         page = Math.Max(1, number);
-        SheetRotation.Angle = (row?.PageRotations.GetValueOrDefault(page) ?? 0) * 90;
         designation = name = stamp = null;
         dragStart = dragEnd = null;
         RegionControls.Visibility = Visibility.Collapsed;
@@ -361,6 +738,7 @@ public sealed partial class MainWindow : Window
             await bitmap.SetBitmapAsync(buffer);
             operation.Token.ThrowIfCancellationRequested();
             sheetSize = (result.raster.Width, result.raster.Height);
+            UpdateSheetTransforms();
             PageImage.Source = bitmap;
             UpdateCommands();
             pageCount = result.count;
@@ -368,7 +746,7 @@ public sealed partial class MainWindow : Window
             PreviousButton.IsEnabled = page > 1;
             NextButton.IsEnabled = page < pageCount;
             PreviewMessage.Visibility = Visibility.Collapsed;
-            RegionControls.Visibility = Visibility.Visible;
+            RegionControls.Visibility = Editor.Visibility;
             UpdateRegionGuidance();
             Area? frame = null;
             if (row.SelectedCandidate is { } candidate && candidate.Page == page)
@@ -398,16 +776,84 @@ public sealed partial class MainWindow : Window
     private void RotateLeft(object sender, RoutedEventArgs e) => RotateSheet(-90);
     private void RotateRight(object sender, RoutedEventArgs e) => RotateSheet(90);
     private void FitPage(object sender, RoutedEventArgs e) => FitSheet();
+    private Area? CurrentStamp => stamp ?? (current?.SelectedCandidate is { } candidate && candidate.Page == page
+        ? candidate.Regions.TitleBlock : null);
+
+    private void FitStamp(object sender, RoutedEventArgs e)
+    {
+        if (CurrentStamp is { IsValid: true } frame) FitSheet(frame);
+    }
+
+    private void UpdateDeskewButton()
+    {
+        var applied = current?.PageAlignments.ContainsKey(page) == true;
+        var suggestions = current?.AvailableAlignments;
+        var angle = suggestions?.GetValueOrDefault(page).Angle ?? 0;
+        DeskewButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && (applied || angle != 0);
+        DeskewButton.IsChecked = applied;
+        var label = applied ? "Отменить выравнивание листа" : "Выровнять лист";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DeskewButton, label);
+        ToolTipService.SetToolTip(DeskewButton, applied ? label : angle != 0 ? $"Выровнять лист ({Math.Abs(angle):0.00}°)"
+            : suggestions is null ? "Сначала нажмите «Распознать»."
+            : suggestions.ContainsKey(page) ? "Лист уже выровнен." : "По рамке и штампу не удалось определить угол.");
+    }
+
+    private void ToggleDeskew(object sender, RoutedEventArgs e)
+    {
+        if (current is not { } row || !CanChangeDocuments || PageImage.Source is null ||
+            dragStart.HasValue)
+        {
+            UpdateDeskewButton();
+            return;
+        }
+        if (row.PageAlignments.Remove(page))
+        {
+            UpdateSheetTransforms();
+            UpdateDeskewButton();
+            FitSheet();
+            ViewModel.Message = "Выравнивание листа отменено.";
+            return;
+        }
+
+        if (row.AvailableAlignments?.TryGetValue(page, out var alignment) == true && alignment.Angle != 0)
+        {
+            row.PageAlignments[page] = alignment;
+            UpdateSheetTransforms();
+            FitSheet();
+            var scale = alignment.Scale < 1 ? $" · Масштаб содержимого {alignment.Scale:P1}" : "";
+            var action = row.InMergeProposal ? "объединении" : "переименовании";
+            ViewModel.Message = $"Скан выровнен на {Math.Abs(alignment.Angle):0.00}°{scale} · Правка сохранится при {action}.";
+        }
+        UpdateDeskewButton();
+    }
+
+    private void ScrollPreviewHorizontally(object sender, PointerRoutedEventArgs e)
+    {
+        if ((e.KeyModifiers & Windows.System.VirtualKeyModifiers.Shift) == 0) return;
+        var input = e.GetCurrentPoint(PreviewScroll).Properties;
+        if (input.IsHorizontalMouseWheel) return;
+        var offset = PreviewScroll.HorizontalOffset - input.MouseWheelDelta * .8;
+        PreviewScroll.ChangeView(Math.Clamp(offset, 0, PreviewScroll.ScrollableWidth), null, null, true);
+        e.Handled = true;
+    }
 
     private void RotateSheet(int degrees)
     {
         if (current is not { } row || PageImage.Source is null || dragStart.HasValue) return;
-        SheetRotation.Angle = (SheetRotation.Angle + degrees + 360) % 360;
-        var turns = PreviewTurn;
+        var turns = (PreviewTurn + degrees / 90 + 4) & 3;
         if (turns == 0) row.PageRotations.Remove(page);
         else row.PageRotations[page] = turns;
+        UpdateSheetTransforms();
         Orientation.SelectedIndex = 0;
         FitSheet();
+    }
+
+    private void UpdateSheetTransforms()
+    {
+        SheetRotation.Angle = PreviewTurn * 90;
+        var alignment = Alignment;
+        ScanTransform.Rotation = alignment.Angle;
+        ScanTransform.ScaleX = ScanTransform.ScaleY = alignment.Scale;
     }
 
     private void FitSheet(Area? frame = null)
@@ -418,13 +864,15 @@ public sealed partial class MainWindow : Window
         var (width, height) = sheetSize;
         var turn = PreviewTurn;
         var (extentWidth, extentHeight) = (turn & 1) == 0 ? (width, height) : (height, width);
-        var focus = frame is { IsValid: true } block ? block.Rotate(turn) : Area.Full;
+        var focus = frame is { IsValid: true } block ? Alignment.Bounds(block, width, height).Rotate(turn) : Area.Full;
+        if (!focus.IsValid) focus = Area.Full;
         var scale = Math.Min(Math.Max(1, PreviewScroll.ActualWidth - 16) / (extentWidth * focus.Width),
             Math.Max(1, PreviewScroll.ActualHeight - 16) / (extentHeight * focus.Height));
         SheetExtent.Width = extentWidth * scale;
         SheetExtent.Height = extentHeight * scale;
-        Sheet.Width = PageImage.Width = width * scale;
-        Sheet.Height = PageImage.Height = height * scale;
+        Sheet.Width = ScanContent.Width = PageImage.Width = width * scale;
+        Sheet.Height = ScanContent.Height = PageImage.Height = height * scale;
+        SheetClip.Rect = new(0, 0, Sheet.Width, Sheet.Height);
         // Keep the rotated sheet centered inside the scrollable bounds.
         Canvas.SetLeft(Sheet, (SheetExtent.Width - Sheet.Width) / 2);
         Canvas.SetTop(Sheet, (SheetExtent.Height - Sheet.Height) / 2);
@@ -469,7 +917,8 @@ public sealed partial class MainWindow : Window
             (result.Status == RecognitionStatus.Missing ||
                 result.Candidates is [{ } candidate] &&
                 (string.IsNullOrWhiteSpace(candidate.Designation) || string.IsNullOrWhiteSpace(candidate.Name))) &&
-            (string.IsNullOrWhiteSpace(row.Designation) || !row.HasDocumentName);
+            (string.IsNullOrWhiteSpace(row.Designation) || (!row.HasDocumentName &&
+                !(row.InMergeProposal && row.SelectedCandidate?.Regions.Name.IsValid == false)));
         ManualRegionsNotice.IsOpen = RegionControls.Visibility == Visibility.Visible &&
             RegionActions.Visibility == Visibility.Collapsed && needsFields;
         ToggleRegionsButton.Visibility = ManualRegionsNotice.IsOpen ? Visibility.Collapsed : Visibility.Visible;
@@ -549,8 +998,8 @@ public sealed partial class MainWindow : Window
 
     private PointD PointerPosition(PointerRoutedEventArgs e)
     {
-        var point = e.GetCurrentPoint(Sheet).Position;
-        return new(Math.Clamp(point.X / Sheet.Width, 0, 1), Math.Clamp(point.Y / Sheet.Height, 0, 1));
+        var point = e.GetCurrentPoint(ScanContent).Position;
+        return new(Math.Clamp(point.X / ScanContent.Width, 0, 1), Math.Clamp(point.Y / ScanContent.Height, 0, 1));
     }
 
     private void PaintRegions()
@@ -599,7 +1048,7 @@ public sealed partial class MainWindow : Window
     private async void ConfirmSelected(object sender, RoutedEventArgs e)
     {
         if (CanChangeDocuments)
-            await ViewModel.ConfirmSelectedAsync(Documents.SelectedItems.OfType<DocumentRow>());
+            await ViewModel.ConfirmIncludedAsync();
     }
 
     private async void SaveRegions(object sender, RoutedEventArgs e) => await ExportRegionsAsync();
@@ -699,7 +1148,7 @@ public sealed partial class MainWindow : Window
 
     private async Task RenameSelectedAsync()
     {
-        var selected = ViewModel.Rows.Where(row => row.Included).ToArray();
+        var selected = ViewModel.Rows.Where(row => row.Included && !row.InMergeProposal).ToArray();
         if (selected.Length == 0)
         {
             ViewModel.Message = "Отметьте файлы и подтвердите распознанные значения.";
@@ -719,10 +1168,15 @@ public sealed partial class MainWindow : Window
             if (closing) return;
             var pending = plans.Where(plan => plan.Status == MoveStatus.Pending).ToArray();
             var approved = pending.Select(plan => plan.Source).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var aligned = requests.Where(request => approved.Contains(request.Source))
+                .Sum(request => request.PageAlignments?.Count ?? 0);
             var skipped = plans.Where(plan => plan.Status == MoveStatus.Skipped).Concat(unconfirmed).ToArray();
             var summary = $"Будет обработано файлов: {pending.Length}. Будет пропущено: {skipped.Length}.";
+            if (aligned > 0) summary += $" Будет сохранено выравнивание листов: {aligned}.";
             var details = skipped.Select(plan => $"{Path.GetFileName(plan.Source)}\n{plan.Message}")
-                .Concat(pending.Select(plan => $"{Path.GetFileName(plan.Source)} → {Path.GetFileName(plan.Target)}"));
+                .Concat(pending.Select(plan => string.Equals(plan.Source, plan.Target, StringComparison.OrdinalIgnoreCase)
+                    ? $"{Path.GetFileName(plan.Source)}\nСохранить выравнивание в этом PDF."
+                    : $"{Path.GetFileName(plan.Source)} → {Path.GetFileName(plan.Target)}"));
             var location = destination is null ? "Сохранение в исходных папках." : $"Папка назначения\n{destination}";
             var message = $"{location}\n\n{summary}\n\n" + string.Join("\n\n", details);
             if (pickerError is not null) message = $"{pickerError}\n\n{message}";
@@ -788,7 +1242,7 @@ public sealed partial class MainWindow : Window
     {
         if (!CanChangeDocuments || !ViewModel.CanUndo) return;
         if (await ConfirmDialog("Отменить последнюю операцию",
-            "Перемещённые PDF вернутся в исходные папки с прежними именами и ориентацией. Созданные копии будут удалены, если исходные PDF и копии не изменились.",
+            "Будут восстановлены исходные файлы, имена и ориентация листов. Созданные копии будут удалены, если исходные PDF и копии не изменились.",
             "Отменить операцию"))
             await ViewModel.MoveAsync(null);
     }
