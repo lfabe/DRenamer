@@ -60,7 +60,7 @@ public sealed partial class DocumentRow : ObservableObject
     public Candidate? SelectedCandidate { get; private set; }
     public IReadOnlyList<Candidate> Candidates => Result?.Candidates ?? [];
     public Dictionary<int, int> PageRotations { get; } = [];
-    internal Dictionary<int, double> PreviewDeskewAngles { get; } = [];
+    internal Dictionary<int, PageAlignment> PageAlignments { get; } = [];
     internal bool HasDocumentName => !string.IsNullOrWhiteSpace(NameForRename);
     public RenameRequest Request => new(Source, Designation, NameForRename)
     {
@@ -86,7 +86,7 @@ public sealed partial class DocumentRow : ObservableObject
         if (SourceHash != result.SourceHash)
         {
             PageRotations.Clear();
-            PreviewDeskewAngles.Clear();
+            PageAlignments.Clear();
         }
         MergeEligible = false;
         SheetNumberText = "";

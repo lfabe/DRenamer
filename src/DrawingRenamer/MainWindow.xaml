@@ -331,9 +331,13 @@
                                             PointerPressed="RegionPressed" PointerMoved="RegionMoved" PointerReleased="RegionReleased"
                                             PointerCaptureLost="RegionCaptureLost">
                                         <Canvas.RenderTransform><RotateTransform x:Name="SheetRotation"/></Canvas.RenderTransform>
-                                        <Image x:Name="PageImage" Stretch="Fill" IsHitTestVisible="False"
-                                               AutomationProperties.Name="Изображение листа PDF"/>
-                                        <Canvas x:Name="Overlays" IsHitTestVisible="False"/>
+                                        <Canvas.Clip><RectangleGeometry x:Name="SheetClip"/></Canvas.Clip>
+                                        <Canvas x:Name="ScanContent" RenderTransformOrigin="0.5,0.5">
+                                            <Canvas.RenderTransform><CompositeTransform x:Name="ScanTransform"/></Canvas.RenderTransform>
+                                            <Image x:Name="PageImage" Stretch="Fill" IsHitTestVisible="False"
+                                                   AutomationProperties.Name="Изображение листа PDF"/>
+                                            <Canvas x:Name="Overlays" IsHitTestVisible="False"/>
+                                        </Canvas>
                                     </Canvas>
                                 </Canvas>
                             </ScrollViewer>
@@ -341,7 +345,10 @@
                                        Margin="16" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
                         </Grid>
                     </Border>
-                    <StackPanel x:Name="RegionControls" Grid.Row="2" Spacing="5" Visibility="Collapsed">
+                    <StackPanel Grid.Row="2" Spacing="5">
+                    <Button x:Name="SaveAlignedPdfButton" Content="Сохранить выровненный PDF…"
+                            Click="SaveAlignedPdf" Visibility="Collapsed"/>
+                    <StackPanel x:Name="RegionControls" Spacing="5" Visibility="Collapsed">
                         <InfoBar x:Name="ManualRegionsNotice" Severity="Warning" IsClosable="False"
                                  Title="Нужно уточнить графы" Message="Обведите графы на листе или заполните поля ниже.">
                             <InfoBar.ActionButton>
@@ -369,6 +376,7 @@
                         </StackPanel>
                         <TextBlock x:Name="RegionHint" TextWrapping="Wrap" Visibility="Collapsed"
                                    Style="{StaticResource CaptionTextBlockStyle}" AutomationProperties.LiveSetting="Polite"/>
+                    </StackPanel>
                     </StackPanel>
                     <StackPanel Grid.Row="3" Spacing="7">
                     <StackPanel x:Name="MergeDetails" Spacing="4" Visibility="Collapsed">

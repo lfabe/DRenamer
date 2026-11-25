@@ -717,24 +717,28 @@ public sealed class RecognitionTests : IDisposable
     [InlineData(2.5)]
     public void DeskewFindsTheDrawingFrameDespiteLongLinesInsideIt(double degrees)
     {
+        using var input = File.OpenRead(Pdf(TiltedDrawingFrame(degrees)));
+        var alignment = Assert.IsType<PageAlignment>(new PdfRenderer().FindPageAlignment(input, 1, null, default));
+        Assert.InRange(alignment.Angle, degrees - .15, degrees + .15);
+    }
+
+    private static Page TiltedDrawingFrame(double degrees, int rotation = 0)
+    {
         FormattableString transform = $"""
             q 1 0 0 1 297.5 421 cm
             q {Math.Cos(degrees * Math.PI / 180):0.000000} {Math.Sin(degrees * Math.PI / 180):0.000000} {-Math.Sin(degrees * Math.PI / 180):0.000000} {Math.Cos(degrees * Math.PI / 180):0.000000} 0 0 cm
             1 w -249.5 -407 531 814 re S Q Q
             1 w 130 350 m 465 350 l S 310 170 m 310 660 l S
             """;
-        var path = Pdf(new Page(595, 842, 0, FormattableString.Invariant(transform)));
-        using var input = File.OpenRead(path);
-        var angle = Assert.IsType<double>(new PdfRenderer().DeskewAngle(input, 1, null, default));
-        Assert.InRange(angle, degrees - .15, degrees + .15);
+        return new Page(595, 842, rotation, FormattableString.Invariant(transform));
     }
 
     [Fact]
     public void DeskewUsesTheStampWhenTheOuterFrameIsMissing()
     {
         using var input = File.OpenRead(Path.Combine(AppContext.BaseDirectory, "scan-skewed.pdf"));
-        var angle = Assert.IsType<double>(new PdfRenderer().DeskewAngle(input, 1, null, default));
-        Assert.InRange(angle, 1.25, 1.55);
+        var alignment = Assert.IsType<PageAlignment>(new PdfRenderer().FindPageAlignment(input, 1, null, default));
+        Assert.InRange(alignment.Angle, 1.25, 1.55);
     }
 
     [Theory]
@@ -743,7 +747,62 @@ public sealed class RecognitionTests : IDisposable
     public void DeskewRequiresAgreementBetweenFrameLines(string otherLine)
     {
         using var input = File.OpenRead(Pdf(new Page(595, 842, 0, "1 w 35 47 m 547 65 l S" + otherLine)));
-        Assert.Null(new PdfRenderer().DeskewAngle(input, 1, null, default));
+        Assert.Null(new PdfRenderer().FindPageAlignment(input, 1, null, default));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(90)]
+    public void SavedAlignmentLevelsContentAndPreservesPaperSizeAndOtherPages(int rotation)
+    {
+        var renderer = new PdfRenderer();
+        var source = Pdf(TiltedDrawingFrame(2.5, rotation), Sheet(842, 595, 0));
+        var destination = Path.Combine(folder, "aligned.pdf");
+        var hash = RenameService.Hash(source);
+        using var input = File.OpenRead(source);
+        var alignment = Assert.IsType<PageAlignment>(renderer.FindPageAlignment(input, 1, null, default));
+        Assert.InRange(alignment.Angle, 2.35, 2.65);
+
+        PdfRenderer.SaveAlignedCopy(source, destination, hash, new Dictionary<int, (PageAlignment, int)> { [1] = (alignment, 0) });
+
+        using var output = File.OpenRead(destination);
+        Assert.Equal(2, renderer.CountPages(output, default));
+        Assert.Equal(renderer.PageSize(input, 1, default), renderer.PageSize(output, 1, default));
+        Assert.Equal(PageAlignment.Original, renderer.FindPageAlignment(output, 1, null, default));
+        Assert.Equal(renderer.Render(source, 2, Area.Full, 640, default).Pixels,
+            renderer.Render(destination, 2, Area.Full, 640, default).Pixels);
+        Assert.Equal(hash, RenameService.Hash(source));
+    }
+
+    [Fact]
+    public void AlignmentKeepsScaleUnlessInkWouldGoPastThePaperEdge()
+    {
+        var pixels = new byte[4 * 600 * 800];
+        Array.Fill(pixels, byte.MaxValue);
+        var scan = new Raster(600, 800, pixels);
+        pixels.AsSpan(4 * (300 + 400 * 600), 3).Clear();
+        Assert.Equal(1, PageAlignment.ForScan(scan, 2.5, default).Scale);
+
+        pixels.AsSpan(0, 3).Clear();
+        var scaled = PageAlignment.ForScan(scan, 2.5, default);
+        Assert.InRange(scaled.Scale, .93, .99);
+        Assert.True(scaled.Bounds(Area.Full, scan.Width, scan.Height).IsValid);
+    }
+
+    [Fact]
+    public void AlignmentExportProtectsTheSourceAndExistingDestinationOnFailure()
+    {
+        var source = Pdf(TiltedDrawingFrame(2.5));
+        var destination = Path.Combine(folder, "existing.pdf");
+        File.WriteAllText(destination, "existing content");
+        var original = RenameService.Hash(source);
+        var pages = new Dictionary<int, (PageAlignment, int)> { [1] = (new(2.5, 1), 0) };
+
+        Assert.Throws<IOException>(() => PdfRenderer.SaveAlignedCopy(source, source, original, pages));
+        Assert.Throws<InvalidDataException>(() => PdfRenderer.SaveAlignedCopy(source, destination, "changed", pages));
+        Assert.Equal(original, RenameService.Hash(source));
+        Assert.Equal("existing content", File.ReadAllText(destination));
+        Assert.Empty(Directory.EnumerateFiles(folder, "*.tmp"));
     }
 
     [Fact]

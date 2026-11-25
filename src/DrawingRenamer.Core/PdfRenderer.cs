@@ -138,7 +138,7 @@ public sealed class PdfRenderer
         return WithDocument(input, document => RenderPage(document, number, crop, maxEdge, token, turn), token);
     }
 
-    public double? DeskewAngle(Stream input, int number, IReadOnlyList<TitleTemplate>? templates, CancellationToken token)
+    public PageAlignment? FindPageAlignment(Stream input, int number, IReadOnlyList<TitleTemplate>? templates, CancellationToken token)
     {
         var raster = WithDocument(input, document => RenderPage(document, number, Area.Full, 1800, token, 0), token);
         var slope = ScanDeskew.FindFrameSlope(raster, token);
@@ -150,7 +150,75 @@ public sealed class PdfRenderer
             if (stampSlopes.Length == 0 || stampSlopes.Max() - stampSlopes.Min() > .006) return null;
             slope = stampSlopes.Average();
         }
-        return -Math.Atan(slope.Value) * 180 / Math.PI;
+        return PageAlignment.ForScan(raster, -Math.Atan(slope.Value) * 180 / Math.PI, token);
+    }
+
+    public static void SaveAlignedCopy(string source, string destination, string expectedHash,
+        IReadOnlyDictionary<int, (PageAlignment Alignment, int Turns)> pages)
+    {
+        source = Path.GetFullPath(source);
+        destination = Path.GetFullPath(destination);
+        if (string.Equals(source, destination, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Выберите другое имя для выровненной копии.");
+        if (pages.Count == 0) throw new ArgumentException("Выберите листы для выравнивания.", nameof(pages));
+
+        var temporary = Path.Combine(Path.GetDirectoryName(destination)!, $".drawing-renamer-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using var input = File.OpenRead(source);
+            if (RenameService.Hash(input) != expectedHash)
+                throw new InvalidDataException("PDF изменился. Откройте его заново.");
+            using (var output = new FileStream(temporary, FileMode.CreateNew))
+            {
+                WithDocument(input, document =>
+                {
+                    const uint modifyContents = 1 << 3;
+                    if ((Native.FPDF_GetDocPermissions(document) & modifyContents) == 0)
+                        throw new InvalidDataException("Параметры защиты PDF запрещают менять содержимое листов.");
+                    var count = Native.FPDF_GetPageCount(document);
+                    foreach (var (number, (alignment, turns)) in pages)
+                    {
+                        if (number < 1 || number > count || turns is < 0 or > 3 ||
+                            !double.IsFinite(alignment.Angle) || Math.Abs(alignment.Angle) > 4 ||
+                            !double.IsFinite(alignment.Scale) || alignment.Scale is <= 0 or > 1)
+                            throw new InvalidDataException("Указаны недопустимые параметры выравнивания листа.");
+                        AlignPage(document, number, alignment, turns);
+                    }
+                    const uint noIncremental = 2;
+                    return Save(document, output, noIncremental);
+                });
+                output.Flush(flushToDisk: true);
+            }
+            // Keep the source open until publication so it cannot be replaced through an alias.
+            File.Move(temporary, destination, overwrite: true);
+        }
+        finally { File.Delete(temporary); }
+    }
+
+    private static unsafe void AlignPage(IntPtr document, int number, PageAlignment alignment, int turns)
+    {
+        var page = Native.FPDF_LoadPage(document, number - 1);
+        if (page == IntPtr.Zero) throw new InvalidDataException("Не удалось открыть страницу PDF.");
+        try
+        {
+            if (Native.FPDF_GetPageBoundingBox(page, out var box) == 0)
+                throw new InvalidDataException("Не удалось определить границы страницы PDF.");
+            var x = ((double)box.Left + box.Right) / 2;
+            var y = ((double)box.Bottom + box.Top) / 2;
+            // PDF coordinates point upward, opposite to the clockwise angle in the preview.
+            var (sin, cos) = Math.SinCos(-alignment.Angle * Math.PI / 180);
+            sin *= alignment.Scale;
+            cos *= alignment.Scale;
+            var matrix = new Native.Matrix((float)cos, (float)sin, (float)-sin, (float)cos,
+                (float)(x - cos * x + sin * y), (float)(y - sin * x - cos * y));
+            // Clip both before and after the transform, preserving the source page's visible crop.
+            if (Native.FPDFPage_TransFormWithClip(page, null, in box) == 0 ||
+                Native.FPDFPage_TransFormWithClip(page, &matrix, in box) == 0)
+                throw new InvalidDataException($"Не удалось выровнять содержимое листа {number}.");
+            Native.FPDFPage_TransformAnnots(page, matrix.A, matrix.B, matrix.C, matrix.D, matrix.E, matrix.F);
+            if (turns != 0) Native.FPDFPage_SetRotation(page, (Native.FPDFPage_GetRotation(page) + turns) % 4);
+        }
+        finally { Native.FPDF_ClosePage(page); }
     }
 
     internal static void SaveRotated(Stream input, Stream output, IReadOnlyDictionary<int, int> rotations)
@@ -404,6 +472,10 @@ public sealed class PdfRenderer
         public delegate int WriteBlock(IntPtr writer, IntPtr buffer, uint size);
         [StructLayout(LayoutKind.Sequential)]
         public readonly record struct FileWrite(int Version, WriteBlock Write);
+        [StructLayout(LayoutKind.Sequential)]
+        public readonly record struct PageBox(float Left, float Top, float Right, float Bottom);
+        [StructLayout(LayoutKind.Sequential)]
+        public readonly record struct Matrix(float A, float B, float C, float D, float E, float F);
         [DllImport(Dll)] public static extern void FPDF_InitLibrary();
         [DllImport(Dll)] public static extern void FPDF_DestroyLibrary();
         [DllImport(Dll)] public static extern IntPtr FPDF_LoadCustomDocument(ref FileAccess access, IntPtr password);
@@ -416,6 +488,10 @@ public sealed class PdfRenderer
         [DllImport(Dll)] public static extern void FPDF_ClosePage(IntPtr page);
         [DllImport(Dll)] public static extern int FPDFPage_GetRotation(IntPtr page);
         [DllImport(Dll)] public static extern void FPDFPage_SetRotation(IntPtr page, int turns);
+        [DllImport(Dll)] public static extern int FPDF_GetPageBoundingBox(IntPtr page, out PageBox box);
+        [DllImport(Dll)] public static extern unsafe int FPDFPage_TransFormWithClip(IntPtr page, Matrix* matrix, in PageBox box);
+        [DllImport(Dll)] public static extern void FPDFPage_TransformAnnots(IntPtr page, double a, double b, double c,
+            double d, double e, double f);
         [DllImport(Dll)] public static extern int FPDF_SaveAsCopy(IntPtr document, ref FileWrite writer, uint flags);
         [DllImport(Dll)] public static extern IntPtr FPDF_CreateNewDocument();
         [DllImport(Dll)] public static extern int FPDF_ImportPagesByIndex(IntPtr target, IntPtr source,

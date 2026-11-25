@@ -57,6 +57,8 @@ public sealed partial class MainWindow : Window
     private DocumentRow[] draggedQueueRows = [];
     private bool CanChangeDocuments => !closing && !ViewModel.Busy && !renaming && !choosingDocuments;
     private int PreviewTurn => current?.PageRotations.GetValueOrDefault(page) ?? 0;
+    private PageAlignment Alignment => current?.PageAlignments.GetValueOrDefault(page, PageAlignment.Original)
+        ?? PageAlignment.Original;
     private int RegionTurn => (PreviewTurn + Orientation.SelectedIndex) & 3;
     private double RegionStrokeThickness => 1.25 / PreviewScroll.ZoomFactor;
 
@@ -734,7 +736,7 @@ public sealed partial class MainWindow : Window
             await bitmap.SetBitmapAsync(buffer);
             operation.Token.ThrowIfCancellationRequested();
             sheetSize = (result.raster.Width, result.raster.Height);
-            UpdateSheetAngle();
+            UpdateSheetTransforms();
             PageImage.Source = bitmap;
             UpdateCommands();
             pageCount = result.count;
@@ -783,11 +785,13 @@ public sealed partial class MainWindow : Window
     private void UpdateDeskewButton()
     {
         DeskewButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && deskew is null;
-        var applied = current?.PreviewDeskewAngles.ContainsKey(page) == true;
+        var applied = current?.PageAlignments.ContainsKey(page) == true;
         DeskewButton.IsChecked = applied;
         var label = applied ? "Отменить выравнивание листа" : "Выровнять лист";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DeskewButton, label);
         ToolTipService.SetToolTip(DeskewButton, label);
+        SaveAlignedPdfButton.Visibility = current?.PageAlignments.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SaveAlignedPdfButton.IsEnabled = DeskewButton.IsEnabled;
     }
 
     private async void ToggleDeskew(object sender, RoutedEventArgs e)
@@ -798,11 +802,11 @@ public sealed partial class MainWindow : Window
             UpdateDeskewButton();
             return;
         }
-        if (row.PreviewDeskewAngles.Remove(page))
+        if (row.PageAlignments.Remove(page))
         {
-            UpdateSheetAngle();
-            FitSheet();
+            UpdateSheetTransforms();
             UpdateDeskewButton();
+            FitSheet();
             ViewModel.Message = "Выравнивание листа отменено.";
             return;
         }
@@ -816,24 +820,26 @@ public sealed partial class MainWindow : Window
         try
         {
             var options = await ViewModel.LoadRecognitionOptionsAsync(useDefaultsOnError: true);
-            var angle = await Task.Run(() =>
+            var correction = await Task.Run(() =>
             {
                 using var input = File.OpenRead(source);
                 if (RenameService.Hash(input) != expectedHash)
                     throw new InvalidDataException("PDF изменился. Откройте лист заново.");
-                return renderer.DeskewAngle(input, number, options.Templates, operation.Token);
+                return renderer.FindPageAlignment(input, number, options.Templates, operation.Token);
             }, operation.Token);
             operation.Token.ThrowIfCancellationRequested();
-            if (angle is null)
+            if (correction is not { } alignment)
                 ViewModel.Message = "Не удалось определить наклон по рамке листа или штампа.";
-            else if (Math.Abs(angle.Value) < .15)
+            else if (alignment.Angle == 0)
                 ViewModel.Message = "Лист уже выровнен.";
             else
             {
-                row.PreviewDeskewAngles[number] = angle.Value;
-                UpdateSheetAngle();
+                row.PageAlignments[number] = alignment;
+                UpdateSheetTransforms();
+                UpdateDeskewButton();
                 FitSheet();
-                ViewModel.Message = $"Лист выровнен в просмотре на {Math.Abs(angle.Value):0.0}°.";
+                var scale = alignment.Scale < 1 ? $" · Масштаб содержимого {alignment.Scale:P1}" : "";
+                ViewModel.Message = $"Скан выровнен на {Math.Abs(alignment.Angle):0.0}°{scale}.";
             }
         }
         catch (OperationCanceledException) { }
@@ -845,6 +851,40 @@ public sealed partial class MainWindow : Window
         {
             deskew = null;
             if (!closing) UpdateDeskewButton();
+        }
+    }
+
+    private async void SaveAlignedPdf(object sender, RoutedEventArgs e)
+    {
+        if (!CanChangeDocuments || deskew is not null || current is not { SourceHash: { } hash } row ||
+            row.PageAlignments.Count == 0) return;
+        var source = row.Source;
+        var pages = row.PageAlignments.ToDictionary(item => item.Key,
+            item => (item.Value, row.PageRotations.GetValueOrDefault(item.Key)));
+        choosingDocuments = true;
+        UpdateCommands();
+        try
+        {
+            var picker = new FileSavePicker
+            {
+                SuggestedFileName = $"{Path.GetFileNameWithoutExtension(source)} (выровнено)",
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary
+            };
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            picker.FileTypeChoices.Add("Документ PDF", [".pdf"]);
+            var file = await picker.PickSaveFileAsync();
+            if (file is null || closing) return;
+            await Task.Run(() => PdfRenderer.SaveAlignedCopy(source, file.Path, hash, pages));
+            if (!closing) ViewModel.Message = $"Сохранена выровненная копия PDF · {file.Path}";
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            if (!closing) ViewModel.Message = $"Не удалось сохранить выровненный PDF. {ex.Message}";
+        }
+        finally
+        {
+            choosingDocuments = false;
+            if (!closing) UpdateCommands();
         }
     }
 
@@ -864,13 +904,18 @@ public sealed partial class MainWindow : Window
         var turns = (PreviewTurn + degrees / 90 + 4) & 3;
         if (turns == 0) row.PageRotations.Remove(page);
         else row.PageRotations[page] = turns;
-        UpdateSheetAngle();
+        UpdateSheetTransforms();
         Orientation.SelectedIndex = 0;
         FitSheet();
     }
 
-    private void UpdateSheetAngle() => SheetRotation.Angle =
-        PreviewTurn * 90 + (current?.PreviewDeskewAngles.GetValueOrDefault(page) ?? 0);
+    private void UpdateSheetTransforms()
+    {
+        SheetRotation.Angle = PreviewTurn * 90;
+        var alignment = Alignment;
+        ScanTransform.Rotation = alignment.Angle;
+        ScanTransform.ScaleX = ScanTransform.ScaleY = alignment.Scale;
+    }
 
     private void FitSheet(Area? frame = null)
     {
@@ -878,16 +923,17 @@ public sealed partial class MainWindow : Window
         PreviewScroll.ChangeView(0, 0, 1, true);
         Root.UpdateLayout();
         var (width, height) = sheetSize;
-        var (sin, cos) = Math.SinCos(SheetRotation.Angle * Math.PI / 180);
-        var (extentWidth, extentHeight) = RotatedSize(width, height);
-        var focus = frame is { IsValid: true } block ? block : Area.Full;
-        var (focusWidth, focusHeight) = RotatedSize(width * focus.Width, height * focus.Height);
-        var scale = Math.Min(Math.Max(1, PreviewScroll.ActualWidth - 16) / focusWidth,
-            Math.Max(1, PreviewScroll.ActualHeight - 16) / focusHeight);
+        var turn = PreviewTurn;
+        var (extentWidth, extentHeight) = (turn & 1) == 0 ? (width, height) : (height, width);
+        var focus = frame is { IsValid: true } block ? Alignment.Bounds(block, width, height).Rotate(turn) : Area.Full;
+        if (!focus.IsValid) focus = Area.Full;
+        var scale = Math.Min(Math.Max(1, PreviewScroll.ActualWidth - 16) / (extentWidth * focus.Width),
+            Math.Max(1, PreviewScroll.ActualHeight - 16) / (extentHeight * focus.Height));
         SheetExtent.Width = extentWidth * scale;
         SheetExtent.Height = extentHeight * scale;
-        Sheet.Width = PageImage.Width = width * scale;
-        Sheet.Height = PageImage.Height = height * scale;
+        Sheet.Width = ScanContent.Width = PageImage.Width = width * scale;
+        Sheet.Height = ScanContent.Height = PageImage.Height = height * scale;
+        SheetClip.Rect = new(0, 0, Sheet.Width, Sheet.Height);
         // Keep the rotated sheet centered inside the scrollable bounds.
         Canvas.SetLeft(Sheet, (SheetExtent.Width - Sheet.Width) / 2);
         Canvas.SetTop(Sheet, (SheetExtent.Height - Sheet.Height) / 2);
@@ -895,15 +941,10 @@ public sealed partial class MainWindow : Window
         if (focus == Area.Full) return;
 
         PreviewScroll.UpdateLayout();
-        var centerX = (focus.X + focus.Width / 2 - .5) * width;
-        var centerY = (focus.Y + focus.Height / 2 - .5) * height;
-        var x = (extentWidth / 2 + centerX * cos - centerY * sin) * scale - PreviewScroll.ViewportWidth / 2;
-        var y = (extentHeight / 2 + centerX * sin + centerY * cos) * scale - PreviewScroll.ViewportHeight / 2;
+        var x = (focus.X + focus.Width / 2) * SheetExtent.Width - PreviewScroll.ViewportWidth / 2;
+        var y = (focus.Y + focus.Height / 2) * SheetExtent.Height - PreviewScroll.ViewportHeight / 2;
         PreviewScroll.ChangeView(Math.Clamp(x, 0, PreviewScroll.ScrollableWidth),
             Math.Clamp(y, 0, PreviewScroll.ScrollableHeight), null, true);
-
-        (double Width, double Height) RotatedSize(double w, double h) =>
-            (w * Math.Abs(cos) + h * Math.Abs(sin), w * Math.Abs(sin) + h * Math.Abs(cos));
     }
 
     private void ToggleRegions(object sender, RoutedEventArgs e)
@@ -1018,8 +1059,8 @@ public sealed partial class MainWindow : Window
 
     private PointD PointerPosition(PointerRoutedEventArgs e)
     {
-        var point = e.GetCurrentPoint(Sheet).Position;
-        return new(Math.Clamp(point.X / Sheet.Width, 0, 1), Math.Clamp(point.Y / Sheet.Height, 0, 1));
+        var point = e.GetCurrentPoint(ScanContent).Position;
+        return new(Math.Clamp(point.X / ScanContent.Width, 0, 1), Math.Clamp(point.Y / ScanContent.Height, 0, 1));
     }
 
     private void PaintRegions()
