@@ -25,22 +25,18 @@ internal static class WindowsFile
             throw LastFileError();
     }
 
-    internal static bool TryRenameOnSameVolume(FileStream file, string target, bool replaceOpenTarget = false)
+    internal static bool TryRenameOnSameVolume(FileStream file, string target)
     {
         const int fileRenameInfo = 3;
-        const int fileRenameInfoEx = 22;
-        const uint replaceIfExistsAndPreserveOpenHandles = 3;
         const int notSameDevice = 17;
         // FILE_RENAME_INFO has a flags word, an aligned HANDLE, a byte count and the UTF-16 name.
         var lengthOffset = 2 * IntPtr.Size;
         var nameOffset = lengthOffset + sizeof(int);
         var length = Encoding.Unicode.GetByteCount(target);
         var info = new byte[nameOffset + length + sizeof(char)];
-        if (replaceOpenTarget) BitConverter.TryWriteBytes(info, replaceIfExistsAndPreserveOpenHandles);
         BitConverter.TryWriteBytes(info.AsSpan(lengthOffset), length);
         Encoding.Unicode.GetBytes(target, info.AsSpan(nameOffset));
-        var infoClass = replaceOpenTarget ? fileRenameInfoEx : fileRenameInfo;
-        if (SetFileInformationByHandle(file.SafeFileHandle, infoClass, info, info.Length)) return true;
+        if (SetFileInformationByHandle(file.SafeFileHandle, fileRenameInfo, info, info.Length)) return true;
         if (Marshal.GetLastPInvokeError() == notSameDevice) return false;
         throw LastFileError();
     }

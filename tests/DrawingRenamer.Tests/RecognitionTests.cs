@@ -802,6 +802,77 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public void SavingAlignmentSkipsAnExternalReplacementAfterRecordingIntent()
+    {
+        var source = NamedAlignmentSource();
+        var original = File.ReadAllBytes(source);
+        var replacement = Pdf(TiltedDrawingFrame(-2));
+        var external = File.ReadAllBytes(replacement);
+        var backup = Path.Combine(folder, "backup.pdf");
+        var service = new RenameService(Path.Combine(folder, "history.json"), (temporary, journal) =>
+        {
+            if (!File.Exists(journal))
+            {
+                File.Move(source, backup);
+                File.Move(replacement, source);
+            }
+            File.Move(temporary, journal, overwrite: true);
+        });
+
+        var result = Assert.Single(service.Execute([AlignmentRequest(source)]));
+
+        Assert.Equal(MoveStatus.Skipped, result.Status);
+        Assert.True(result.SourceChanged);
+        Assert.Equal(external, File.ReadAllBytes(source));
+        Assert.Equal(original, File.ReadAllBytes(backup));
+        Assert.False(service.HasUndoableOperations());
+    }
+
+    [Fact]
+    public void UndoOfInPlaceAlignmentPreservesAnExternalReplacement()
+    {
+        var source = NamedAlignmentSource();
+        var service = new RenameService(Path.Combine(folder, "history.json"));
+        Assert.Equal(MoveStatus.Moved, Assert.Single(service.Execute([AlignmentRequest(source)])).Status);
+        var replacement = Pdf(TiltedDrawingFrame(-2));
+        var external = File.ReadAllBytes(replacement);
+        File.Move(replacement, source, overwrite: true);
+
+        Assert.Equal(MoveStatus.Skipped, Assert.Single(service.Undo()).Status);
+        Assert.Equal(external, File.ReadAllBytes(source));
+    }
+
+    [Fact]
+    public void InPlaceEditHandleBlocksReplacementAfterVerification()
+    {
+        var source = NamedAlignmentSource();
+        var original = File.ReadAllBytes(source);
+        var replacement = Pdf(TiltedDrawingFrame(-2));
+        var external = File.ReadAllBytes(replacement);
+        Assert.True(RenameService.EditVerifiedFile(source, RenameService.Hash(source), _ =>
+        {
+            var denied = Record.Exception(() => File.Move(replacement, source, overwrite: true));
+            Assert.True(denied is IOException or UnauthorizedAccessException);
+        }));
+        Assert.Equal(original, File.ReadAllBytes(source));
+        Assert.Equal(external, File.ReadAllBytes(replacement));
+    }
+
+    private string NamedAlignmentSource()
+    {
+        var source = Path.Combine(folder, "ABCD.123456.001_Рама.pdf");
+        File.Move(Pdf(TiltedDrawingFrame(2.5)), source);
+        return source;
+    }
+
+    private static RenameRequest AlignmentRequest(string source) =>
+        new(source, "ABCD.123456.001", "Рама")
+        {
+            ExpectedHash = RenameService.Hash(source),
+            PageAlignments = new Dictionary<int, PageAlignment> { [1] = new(2.5, 1) }
+        };
+
+    [Fact]
     public void AlignmentKeepsScaleUnlessInkWouldGoPastThePaperEdge()
     {
         var pixels = new byte[4 * 600 * 800];

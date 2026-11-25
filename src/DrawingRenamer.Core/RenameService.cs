@@ -308,7 +308,7 @@ public sealed class RenameService(string journalPath)
             if (Hash(input) != hash) return Changed(plan);
             input.Position = 0;
             string? rotatedHash = null;
-            WriteStaged(plan.Target!, output =>
+            var published = WriteStaged(plan.Target!, output =>
             {
                 PdfRenderer.SavePageEdits(input, output, plan.PageRotations, plan.PageAlignments);
                 // Undo restores the original bytes from the saved PDF's previous revision.
@@ -316,7 +316,27 @@ public sealed class RenameService(string journalPath)
                     throw new InvalidDataException("Не удалось сохранить исходную версию PDF для отмены.");
                 rotatedHash = Hash(output);
                 recordPending(new(rotatedHash, input.Length, copy));
-            }, overwrite: editInPlace);
+            }, editInPlace ? output =>
+            {
+                var length = input.Length;
+                input.Dispose();
+                return EditVerifiedFile(plan.Source, hash, original =>
+                {
+                    original.Position = output.Position = length;
+                    try
+                    {
+                        output.CopyTo(original);
+                        original.Flush(flushToDisk: true);
+                    }
+                    catch (IOException)
+                    {
+                        original.SetLength(length);
+                        original.Flush(flushToDisk: true);
+                        throw;
+                    }
+                });
+            } : null);
+            if (!published) return Changed(plan);
             if (editInPlace) return plan with { Status = MoveStatus.Moved, Message = "Скан выровнен в исходном PDF.", ResultHash = rotatedHash };
             if (copy) return plan with { Status = MoveStatus.Copied, Message = $"Копия сохранена с {description}." };
 
@@ -352,14 +372,14 @@ public sealed class RenameService(string journalPath)
         {
             if (string.Equals(plan.Source, plan.Target, StringComparison.OrdinalIgnoreCase))
             {
-                using var current = File.Open(plan.Source, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-                if (Hash(current) != rotation.TargetHash) return skipped;
-                WriteStaged(plan.Source, output =>
+                var restoredInPlace = EditVerifiedFile(plan.Source, rotation.TargetHash, current =>
                 {
-                    if (CopyPrefix(current, output, rotation.OriginalLength) != hash)
+                    if (CopyPrefix(current, Stream.Null, rotation.OriginalLength) != hash)
                         throw new InvalidDataException("Исходную версию PDF не удалось восстановить.");
-                }, overwrite: true);
-                return Restored();
+                    current.SetLength(rotation.OriginalLength);
+                    current.Flush(flushToDisk: true);
+                });
+                return restoredInPlace ? Restored() : skipped;
             }
             using var original = File.Exists(plan.Source) ? File.OpenRead(plan.Source) : null;
             if (original is not null ? Hash(original) != hash : copied || Directory.Exists(plan.Source)) return skipped;
@@ -410,7 +430,16 @@ public sealed class RenameService(string journalPath)
         return Convert.ToHexString(hash.GetHashAndReset());
     }
 
-    private static void WriteStaged(string target, Action<FileStream> write, bool overwrite = false)
+    internal static bool EditVerifiedFile(string path, string expectedHash, Action<FileStream> edit)
+    {
+        // The verified handle denies writes and deletion until the edit finishes.
+        using var file = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        if (Hash(file) != expectedHash) return false;
+        edit(file);
+        return true;
+    }
+
+    private static bool WriteStaged(string target, Action<FileStream> write, Func<FileStream, bool>? publishInPlace = null)
     {
         var temporary = Path.Combine(Path.GetDirectoryName(target)!, $".drawing-renamer-{Guid.NewGuid():N}.tmp");
         var created = false;
@@ -421,15 +450,11 @@ public sealed class RenameService(string journalPath)
                 created = true;
                 write(output);
                 output.Flush(flushToDisk: true);
+                if (publishInPlace is not null) return publishInPlace(output);
             }
-            if (overwrite)
-            {
-                using var staged = WindowsFile.OpenForMove(temporary);
-                if (!WindowsFile.TryRenameOnSameVolume(staged, target, replaceOpenTarget: true))
-                    throw new IOException("Не удалось заменить исходный PDF.");
-            }
-            else File.Move(temporary, target, overwrite: false);
+            File.Move(temporary, target, overwrite: false);
             created = false;
+            return true;
         }
         finally
         {
