@@ -293,8 +293,9 @@
                     </Grid.RowDefinitions>
                     <Grid ColumnSpacing="8">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="Просмотр листа" Style="{StaticResource SubtitleTextBlockStyle}" VerticalAlignment="Center"/>
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="5">
+                        <TextBlock Text="Просмотр листа" FontSize="18" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                   Style="{StaticResource SubtitleTextBlockStyle}" VerticalAlignment="Center"/>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="3">
                             <Button x:Name="PreviousButton" Content="‹" Click="PreviousPage" IsEnabled="False" AutomationProperties.Name="Предыдущий лист"/>
                             <TextBlock x:Name="PageLabel" Text="—" MinWidth="40" TextAlignment="Center" VerticalAlignment="Center"/>
                             <Button x:Name="NextButton" Content="›" Click="NextPage" IsEnabled="False" AutomationProperties.Name="Следующий лист"/>
@@ -312,6 +313,11 @@
                                     AutomationProperties.Name="Вписать по штампу" ToolTipService.ToolTip="Вписать по штампу">
                                 <FontIcon Glyph="&#xE91B;" FontSize="16"/>
                             </Button>
+                            <ToggleButton x:Name="DeskewButton" Click="ToggleDeskew" IsEnabled="False"
+                                          AutomationProperties.Name="Выровнять лист" ToolTipService.ToolTip="Выровнять лист">
+                                <Path Width="16" Height="16" Stretch="Uniform" StrokeThickness="1.5"
+                                      Stroke="{Binding Foreground, ElementName=DeskewButton}" Data="M 1,10 L 15,4 M 1,14 L 15,14"/>
+                            </ToggleButton>
                         </StackPanel>
                     </Grid>
                     <Border Grid.Row="1" MinHeight="140" CornerRadius="4" Background="{ThemeResource SubtleFillColorSecondaryBrush}">

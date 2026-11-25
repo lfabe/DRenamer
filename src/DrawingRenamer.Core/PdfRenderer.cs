@@ -138,6 +138,21 @@ public sealed class PdfRenderer
         return WithDocument(input, document => RenderPage(document, number, crop, maxEdge, token, turn), token);
     }
 
+    public double? DeskewAngle(Stream input, int number, IReadOnlyList<TitleTemplate>? templates, CancellationToken token)
+    {
+        var raster = WithDocument(input, document => RenderPage(document, number, Area.Full, 1800, token, 0), token);
+        var slope = ScanDeskew.FindFrameSlope(raster, token);
+        if (slope is null)
+        {
+            var (width, height) = PageSize(input, number, token);
+            var stampSlopes = ScanTitleLocator.Find(raster, width, height, templates ?? TitleTemplate.Defaults,
+                turn => raster.Orient(turn), token).Select(stamp => stamp.Slope).Distinct().ToArray();
+            if (stampSlopes.Length == 0 || stampSlopes.Max() - stampSlopes.Min() > .006) return null;
+            slope = stampSlopes.Average();
+        }
+        return -Math.Atan(slope.Value) * 180 / Math.PI;
+    }
+
     internal static void SaveRotated(Stream input, Stream output, IReadOnlyDictionary<int, int> rotations)
     {
         WithDocument(input, document =>

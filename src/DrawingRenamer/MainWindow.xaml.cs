@@ -24,6 +24,7 @@ public sealed partial class MainWindow : Window
     public MainViewModel ViewModel { get; } = new();
     private readonly PdfRenderer renderer = new();
     private CancellationTokenSource? preview;
+    private CancellationTokenSource? deskew;
     private DocumentRow? current;
     private int page = 1;
     private int pageCount;
@@ -55,7 +56,7 @@ public sealed partial class MainWindow : Window
     private uint queuePointerId;
     private DocumentRow[] draggedQueueRows = [];
     private bool CanChangeDocuments => !closing && !ViewModel.Busy && !renaming && !choosingDocuments;
-    private int PreviewTurn => (int)SheetRotation.Angle / 90;
+    private int PreviewTurn => current?.PageRotations.GetValueOrDefault(page) ?? 0;
     private int RegionTurn => (PreviewTurn + Orientation.SelectedIndex) & 3;
     private double RegionStrokeThickness => 1.25 / PreviewScroll.ZoomFactor;
 
@@ -108,6 +109,7 @@ public sealed partial class MainWindow : Window
             scannerTimer.Stop();
             analysisTimer.Stop();
             preview?.Cancel();
+            deskew?.Cancel();
             ViewModel.CancelCommand.Execute(null);
         };
         UpdateCommands();
@@ -180,6 +182,7 @@ public sealed partial class MainWindow : Window
         RotateLeftButton.IsEnabled = RotateRightButton.IsEnabled = available && PageImage.Source is not null;
         FitPageButton.IsEnabled = PageImage.Source is not null;
         FitStampButton.IsEnabled = PageImage.Source is not null && CurrentStamp is { IsValid: true };
+        UpdateDeskewButton();
         ToggleRegionsButton.IsEnabled = StartManualRegionsButton.IsEnabled = available;
         MarkDesignationButton.IsEnabled = MarkNameButton.IsEnabled = MarkStampButton.IsEnabled = available;
         ReadRegionsButton.IsEnabled = SaveRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
@@ -690,11 +693,11 @@ public sealed partial class MainWindow : Window
     {
         if (closing) return;
         preview?.Cancel();
+        deskew?.Cancel();
         using var operation = new CancellationTokenSource();
         preview = operation;
         var row = current;
         page = Math.Max(1, number);
-        SheetRotation.Angle = (row?.PageRotations.GetValueOrDefault(page) ?? 0) * 90;
         designation = name = stamp = null;
         dragStart = dragEnd = null;
         RegionControls.Visibility = Visibility.Collapsed;
@@ -731,6 +734,7 @@ public sealed partial class MainWindow : Window
             await bitmap.SetBitmapAsync(buffer);
             operation.Token.ThrowIfCancellationRequested();
             sheetSize = (result.raster.Width, result.raster.Height);
+            UpdateSheetAngle();
             PageImage.Source = bitmap;
             UpdateCommands();
             pageCount = result.count;
@@ -776,6 +780,74 @@ public sealed partial class MainWindow : Window
         if (CurrentStamp is { IsValid: true } frame) FitSheet(frame);
     }
 
+    private void UpdateDeskewButton()
+    {
+        DeskewButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && deskew is null;
+        var applied = current?.PreviewDeskewAngles.ContainsKey(page) == true;
+        DeskewButton.IsChecked = applied;
+        var label = applied ? "Отменить выравнивание листа" : "Выровнять лист";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DeskewButton, label);
+        ToolTipService.SetToolTip(DeskewButton, label);
+    }
+
+    private async void ToggleDeskew(object sender, RoutedEventArgs e)
+    {
+        if (current is not { } row || !CanChangeDocuments || PageImage.Source is null ||
+            dragStart.HasValue || deskew is not null)
+        {
+            UpdateDeskewButton();
+            return;
+        }
+        if (row.PreviewDeskewAngles.Remove(page))
+        {
+            UpdateSheetAngle();
+            FitSheet();
+            UpdateDeskewButton();
+            ViewModel.Message = "Выравнивание листа отменено.";
+            return;
+        }
+
+        var number = page;
+        var source = row.Source;
+        var expectedHash = row.SourceHash;
+        using var operation = new CancellationTokenSource();
+        deskew = operation;
+        UpdateDeskewButton();
+        try
+        {
+            var options = await ViewModel.LoadRecognitionOptionsAsync(useDefaultsOnError: true);
+            var angle = await Task.Run(() =>
+            {
+                using var input = File.OpenRead(source);
+                if (RenameService.Hash(input) != expectedHash)
+                    throw new InvalidDataException("PDF изменился. Откройте лист заново.");
+                return renderer.DeskewAngle(input, number, options.Templates, operation.Token);
+            }, operation.Token);
+            operation.Token.ThrowIfCancellationRequested();
+            if (angle is null)
+                ViewModel.Message = "Не удалось определить наклон по рамке листа или штампа.";
+            else if (Math.Abs(angle.Value) < .15)
+                ViewModel.Message = "Лист уже выровнен.";
+            else
+            {
+                row.PreviewDeskewAngles[number] = angle.Value;
+                UpdateSheetAngle();
+                FitSheet();
+                ViewModel.Message = $"Лист выровнен в просмотре на {Math.Abs(angle.Value):0.0}°.";
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
+        {
+            if (!operation.IsCancellationRequested) ViewModel.Message = $"Не удалось выровнять лист. {ex.Message}";
+        }
+        finally
+        {
+            deskew = null;
+            if (!closing) UpdateDeskewButton();
+        }
+    }
+
     private void ScrollPreviewHorizontally(object sender, PointerRoutedEventArgs e)
     {
         if ((e.KeyModifiers & Windows.System.VirtualKeyModifiers.Shift) == 0) return;
@@ -789,13 +861,16 @@ public sealed partial class MainWindow : Window
     private void RotateSheet(int degrees)
     {
         if (current is not { } row || PageImage.Source is null || dragStart.HasValue) return;
-        SheetRotation.Angle = (SheetRotation.Angle + degrees + 360) % 360;
-        var turns = PreviewTurn;
+        var turns = (PreviewTurn + degrees / 90 + 4) & 3;
         if (turns == 0) row.PageRotations.Remove(page);
         else row.PageRotations[page] = turns;
+        UpdateSheetAngle();
         Orientation.SelectedIndex = 0;
         FitSheet();
     }
+
+    private void UpdateSheetAngle() => SheetRotation.Angle =
+        PreviewTurn * 90 + (current?.PreviewDeskewAngles.GetValueOrDefault(page) ?? 0);
 
     private void FitSheet(Area? frame = null)
     {
@@ -803,11 +878,12 @@ public sealed partial class MainWindow : Window
         PreviewScroll.ChangeView(0, 0, 1, true);
         Root.UpdateLayout();
         var (width, height) = sheetSize;
-        var turn = PreviewTurn;
-        var (extentWidth, extentHeight) = (turn & 1) == 0 ? (width, height) : (height, width);
-        var focus = frame is { IsValid: true } block ? block.Rotate(turn) : Area.Full;
-        var scale = Math.Min(Math.Max(1, PreviewScroll.ActualWidth - 16) / (extentWidth * focus.Width),
-            Math.Max(1, PreviewScroll.ActualHeight - 16) / (extentHeight * focus.Height));
+        var (sin, cos) = Math.SinCos(SheetRotation.Angle * Math.PI / 180);
+        var (extentWidth, extentHeight) = RotatedSize(width, height);
+        var focus = frame is { IsValid: true } block ? block : Area.Full;
+        var (focusWidth, focusHeight) = RotatedSize(width * focus.Width, height * focus.Height);
+        var scale = Math.Min(Math.Max(1, PreviewScroll.ActualWidth - 16) / focusWidth,
+            Math.Max(1, PreviewScroll.ActualHeight - 16) / focusHeight);
         SheetExtent.Width = extentWidth * scale;
         SheetExtent.Height = extentHeight * scale;
         Sheet.Width = PageImage.Width = width * scale;
@@ -819,10 +895,15 @@ public sealed partial class MainWindow : Window
         if (focus == Area.Full) return;
 
         PreviewScroll.UpdateLayout();
-        var x = (focus.X + focus.Width / 2) * SheetExtent.Width - PreviewScroll.ViewportWidth / 2;
-        var y = (focus.Y + focus.Height / 2) * SheetExtent.Height - PreviewScroll.ViewportHeight / 2;
+        var centerX = (focus.X + focus.Width / 2 - .5) * width;
+        var centerY = (focus.Y + focus.Height / 2 - .5) * height;
+        var x = (extentWidth / 2 + centerX * cos - centerY * sin) * scale - PreviewScroll.ViewportWidth / 2;
+        var y = (extentHeight / 2 + centerX * sin + centerY * cos) * scale - PreviewScroll.ViewportHeight / 2;
         PreviewScroll.ChangeView(Math.Clamp(x, 0, PreviewScroll.ScrollableWidth),
             Math.Clamp(y, 0, PreviewScroll.ScrollableHeight), null, true);
+
+        (double Width, double Height) RotatedSize(double w, double h) =>
+            (w * Math.Abs(cos) + h * Math.Abs(sin), w * Math.Abs(sin) + h * Math.Abs(cos));
     }
 
     private void ToggleRegions(object sender, RoutedEventArgs e)
@@ -887,7 +968,7 @@ public sealed partial class MainWindow : Window
 
     private void RegionPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (marking is null || ViewModel.Busy || choosingDocuments) return;
+        if (marking is null || ViewModel.Busy || choosingDocuments || deskew is not null) return;
         dragStart = dragEnd = PointerPosition(e);
         Sheet.CapturePointer(e.Pointer);
         e.Handled = true;

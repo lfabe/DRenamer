@@ -711,6 +711,41 @@ public sealed class RecognitionTests : IDisposable
         Assert.True(candidate.Regions.Designation.IsValid && candidate.Regions.Name.IsValid);
     }
 
+    [Theory]
+    [InlineData(-2.5)]
+    [InlineData(0)]
+    [InlineData(2.5)]
+    public void DeskewFindsTheDrawingFrameDespiteLongLinesInsideIt(double degrees)
+    {
+        FormattableString transform = $"""
+            q 1 0 0 1 297.5 421 cm
+            q {Math.Cos(degrees * Math.PI / 180):0.000000} {Math.Sin(degrees * Math.PI / 180):0.000000} {-Math.Sin(degrees * Math.PI / 180):0.000000} {Math.Cos(degrees * Math.PI / 180):0.000000} 0 0 cm
+            1 w -249.5 -407 531 814 re S Q Q
+            1 w 130 350 m 465 350 l S 310 170 m 310 660 l S
+            """;
+        var path = Pdf(new Page(595, 842, 0, FormattableString.Invariant(transform)));
+        using var input = File.OpenRead(path);
+        var angle = Assert.IsType<double>(new PdfRenderer().DeskewAngle(input, 1, null, default));
+        Assert.InRange(angle, degrees - .15, degrees + .15);
+    }
+
+    [Fact]
+    public void DeskewUsesTheStampWhenTheOuterFrameIsMissing()
+    {
+        using var input = File.OpenRead(Path.Combine(AppContext.BaseDirectory, "scan-skewed.pdf"));
+        var angle = Assert.IsType<double>(new PdfRenderer().DeskewAngle(input, 1, null, default));
+        Assert.InRange(angle, 1.25, 1.55);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" 35 15 m 35 820 l S")]
+    public void DeskewRequiresAgreementBetweenFrameLines(string otherLine)
+    {
+        using var input = File.OpenRead(Pdf(new Page(595, 842, 0, "1 w 35 47 m 547 65 l S" + otherLine)));
+        Assert.Null(new PdfRenderer().DeskewAngle(input, 1, null, default));
+    }
+
     [Fact]
     public void ReadsAnInclinedDrawingFontInSelectedScanRegions()
     {
