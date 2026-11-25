@@ -15,7 +15,7 @@
     <Compile Include="../../src/DrawingRenamer/AppSettings.cs" Link="AppSettings.cs" />
     <Compile Include="../../src/DrawingRenamer/ScannerInbox.cs" Link="ScannerInbox.cs" />
     <Using Include="Xunit" />
-    <PdfFixtureName Include="outline-form1.pdf;protected.pdf;scan-form1.pdf;scan-gasket.pdf;scan-connector.pdf;scan-italic.pdf;scan-italic-faded.pdf;scan-rotated.pdf;scan-skewed.pdf;scan-assembly.pdf;scan-nut.pdf;scan-specification.pdf;scan-sideways.pdf" />
+    <PdfFixtureName Include="outline-form1.pdf;protected.pdf;scan-form1.pdf;scan-gasket.pdf;scan-connector.pdf;scan-italic.pdf;scan-italic-faded.pdf;scan-rotated.pdf;scan-skewed.pdf;scan-assembly.pdf;scan-nut.pdf;scan-specification.pdf;scan-sideways.pdf;scan-numbered-batch.pdf" />
     <PdfFixture Include="@(PdfFixtureName->'$(PdfFixtureDirectory)/%(Identity)')" />
     <None Include="@(PdfFixture)" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

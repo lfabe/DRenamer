@@ -44,7 +44,13 @@
                                     <ToggleSwitch Header="Автораспознавание сканов" OnContent="Включено" OffContent="Выключено"
                                                   IsOn="{x:Bind ViewModel.ScannerWatchEnabled, Mode=TwoWay}"
                                                   IsEnabled="{x:Bind ViewModel.HasScannerFolder, Mode=OneWay}"
-                                                  ToolTipService.ToolTip="Для автоанализа PDF в папке сканера включите распознавание OCR."/>
+                                                  ToolTipService.ToolTip="При разбиении пачек сканы добавляются в очередь для ручного запуска распознавания."/>
+                                    <CalendarDatePicker x:Name="ScannerStartDatePicker" Header="Принимать файлы, созданные с"
+                                                        DateChanged="ScannerStartDateChanged"/>
+                                    <TimePicker x:Name="ScannerStartTimePicker" Header="Время" ClockIdentifier="24HourClock"
+                                                TimeChanged="ScannerStartTimeChanged"/>
+                                    <CheckBox Content="Разбивать пачки PDF"
+                                              IsChecked="{x:Bind ViewModel.SplitScanBatches, Mode=TwoWay}"/>
                                 </StackPanel>
                                 <TextBlock Text="{x:Bind ViewModel.TemplateLabel, Mode=OneWay}" TextWrapping="Wrap"/>
                                 <StackPanel Orientation="Horizontal" Spacing="8">
@@ -77,6 +83,8 @@
                 <Button x:Name="AnalyzeButton" Content="Распознать" Command="{x:Bind ViewModel.AnalyzeCommand}"/>
                 <Button x:Name="ConfirmButton" Content="Подтвердить" Click="ConfirmSelected"
                         ToolTipService.ToolTip="Подтвердить значения в выделенных строках"/>
+                <Button x:Name="MergeButton" Content="Объединить" Click="MergeSelected"
+                        Style="{StaticResource AccentButtonStyle}" Visibility="Collapsed"/>
                 <Button x:Name="CancelButton" Content="Остановить анализ" Visibility="Collapsed"
                         Command="{x:Bind ViewModel.CancelCommand}"/>
             </StackPanel>
@@ -94,15 +102,16 @@
                     <Grid Padding="12,12,20,4" ColumnSpacing="8">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="28"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="1*"/>
-                            <ColumnDefinition Width="1*"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="92"/>
+                            <ColumnDefinition Width="1*"/><ColumnDefinition Width="36"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="100"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="1" Text="Исходное имя" Style="{StaticResource CaptionTextBlockStyle}"/>
                         <TextBlock Grid.Column="2" Text="Обозначение" Style="{StaticResource CaptionTextBlockStyle}"/>
                         <TextBlock Grid.Column="3" Text="Наименование" Style="{StaticResource CaptionTextBlockStyle}"/>
-                        <TextBlock Grid.Column="4" Text="Новое имя" Style="{StaticResource CaptionTextBlockStyle}"/>
-                        <TextBlock Grid.Column="5" Text="Статус" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <TextBlock Grid.Column="4" Text="Лист" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <TextBlock Grid.Column="5" Text="Новое имя" Style="{StaticResource CaptionTextBlockStyle}"/>
+                        <TextBlock Grid.Column="6" Text="Статус" Style="{StaticResource CaptionTextBlockStyle}"/>
                     </Grid>
-                    <ListView x:Name="Documents" Grid.Row="1" ItemsSource="{x:Bind ViewModel.Rows}" SelectionMode="Extended"
+                    <ListView x:Name="Documents" Grid.Row="1" SelectionMode="Extended"
                               SelectedItem="{x:Bind ViewModel.Selected, Mode=TwoWay}" SelectionChanged="SelectionChanged"
                               KeyDown="DocumentsKeyDown" AutomationProperties.Name="Документы">
                         <ListView.ItemContainerStyle>
@@ -123,22 +132,29 @@
                                     </Grid.ContextFlyout>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="28"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="1*"/>
-                                        <ColumnDefinition Width="1*"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="92"/>
+                                        <ColumnDefinition Width="1*"/><ColumnDefinition Width="36"/><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="100"/>
                                     </Grid.ColumnDefinitions>
+                                    <Border Grid.ColumnSpan="7" Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                            Visibility="{x:Bind InMergeProposal, Mode=OneWay}"/>
                                     <CheckBox IsChecked="{x:Bind Included, Mode=TwoWay}" MinWidth="0" Padding="0"
+                                              Visibility="{x:Bind IsFile}"
                                               AutomationProperties.Name="{x:Bind OriginalName, Mode=OneWay}"/>
-                                    <TextBlock Grid.Column="1" Text="{x:Bind OriginalName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+                                    <TextBlock Grid.Column="1" Text="{x:Bind FileLabel, Mode=OneWay}" Visibility="{x:Bind IsFile}" TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind Source, Mode=OneWay}"/>
                                     <TextBlock Grid.Column="2" Text="{x:Bind Designation, Mode=OneWay}" TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center"/>
                                     <TextBlock Grid.Column="3" Text="{x:Bind DocumentName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
                                                VerticalAlignment="Center"/>
-                                    <TextBlock Grid.Column="4" Text="{x:Bind NewName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
-                                               VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind NewName, Mode=OneWay}"/>
-                                    <TextBlock Grid.Column="5" Text="{x:Bind Status, Mode=OneWay}" TextWrapping="Wrap"
+                                    <TextBlock Grid.Column="4" Text="{x:Bind SheetNumberText, Mode=OneWay}" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="5" Text="{x:Bind QueueNewName, Mode=OneWay}" TextTrimming="CharacterEllipsis"
+                                               VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind QueueNewName, Mode=OneWay}"/>
+                                    <TextBlock Grid.Column="6" Text="{x:Bind QueueStatus, Mode=OneWay}" TextWrapping="Wrap"
                                                VerticalAlignment="Center" Style="{StaticResource CaptionTextBlockStyle}"
                                                ToolTipService.ToolTip="{x:Bind Diagnostic, Mode=OneWay}"
                                                AutomationProperties.HelpText="{x:Bind Diagnostic, Mode=OneWay}"/>
+                                    <Button Grid.ColumnSpan="6" Content="{x:Bind GroupLabel}" Tag="{x:Bind}" Click="ToggleMergeGroup"
+                                            Visibility="{x:Bind IsMergeHeader}" HorizontalAlignment="Left"
+                                            FontWeight="SemiBold" ToolTipService.ToolTip="Свернуть или раскрыть листы"/>
                                 </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>
@@ -223,17 +239,29 @@
                         <TextBlock x:Name="RegionHint" TextWrapping="Wrap" Visibility="Collapsed"
                                    Style="{StaticResource CaptionTextBlockStyle}" AutomationProperties.LiveSetting="Polite"/>
                     </StackPanel>
-                    <StackPanel x:Name="Editor" Grid.Row="3" Spacing="7" Visibility="Collapsed">
+                    <StackPanel Grid.Row="3" Spacing="7">
+                    <StackPanel x:Name="MergeDetails" Spacing="4" Visibility="Collapsed">
+                        <TextBlock Text="Порядок объединения" FontWeight="SemiBold"/>
+                        <ScrollViewer MaxHeight="92" VerticalScrollBarVisibility="Auto">
+                            <TextBlock x:Name="MergeOrder" TextWrapping="Wrap"/>
+                        </ScrollViewer>
+                        <TextBlock x:Name="MergeDestination" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <StackPanel x:Name="Editor" Spacing="7" Visibility="Collapsed">
                         <ComboBox x:Name="CandidatePicker" Header="Варианты распознавания" Visibility="Collapsed"
                                   HorizontalAlignment="Stretch" SelectionChanged="CandidateChanged"/>
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <TextBox Header="Обозначение" Text="{Binding Designation, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
-                            <TextBox Grid.Column="1" Header="Наименование" Text="{Binding DocumentName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+                            <TextBox Header="Обозначение" Text="{Binding Designation, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" LostFocus="MergeFieldsChanged"/>
+                            <TextBox Grid.Column="1" Header="Наименование" Text="{Binding DocumentName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" LostFocus="MergeFieldsChanged"/>
                         </Grid>
+                        <TextBox x:Name="SheetNumberInput" Header="Номер листа" Width="120" HorizontalAlignment="Left"
+                                 Text="{Binding SheetNumberText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 LostFocus="MergeFieldsChanged" Visibility="Collapsed"/>
                         <TextBlock Text="{Binding Diagnostic, Mode=OneWay}" TextWrapping="Wrap"
                                    AutomationProperties.LiveSetting="Polite"/>
                         <Button HorizontalAlignment="Right" Content="Подтвердить значения" Click="ConfirmValues"/>
+                    </StackPanel>
                     </StackPanel>
                 </Grid>
             </Border>

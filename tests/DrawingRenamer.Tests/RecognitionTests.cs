@@ -65,6 +65,7 @@ public sealed class RecognitionTests : IDisposable
             Assert.Empty(model.Rows);
 
             model.ScannerWatchEnabled = true;
+            model.ScannerCreatedAfter = DateTimeOffset.MinValue;
             await model.CheckScannerFolderAsync(() => true);
             await model.CheckScannerFolderAsync(() => true);
             Assert.Empty(model.Rows);
@@ -95,6 +96,7 @@ public sealed class RecognitionTests : IDisposable
         Assert.Empty(model.Rows);
 
         model.ScannerWatchEnabled = true;
+        model.ScannerCreatedAfter = DateTimeOffset.MinValue;
         await model.CheckScannerFolderAsync(() => true);
         await model.CheckScannerFolderAsync(() => false);
         Assert.Empty(model.Rows);
@@ -119,7 +121,8 @@ public sealed class RecognitionTests : IDisposable
         var path = Path.Combine(inbox, "incoming.pdf");
         File.Copy(Pdf(Sheet(595, 842, 0)), path);
         var lastWrite = File.GetLastWriteTimeUtc(path);
-        var model = new MainViewModel { ScannerWatchEnabled = true, Renamer = new(Path.Combine(folder, "history.json")) };
+        var model = new MainViewModel { ScannerWatchEnabled = true, ScannerCreatedAfter = DateTimeOffset.MinValue,
+            Renamer = new(Path.Combine(folder, "history.json")) };
         model.SetScannerFolder(inbox);
         await model.CheckScannerFolderAsync(() => true);
         await model.CheckScannerFolderAsync(() => true);
@@ -147,7 +150,7 @@ public sealed class RecognitionTests : IDisposable
     {
         var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
         File.Copy(Pdf(Sheet(595, 842, 0)), Path.Combine(inbox, "incoming.pdf"));
-        var model = new MainViewModel { ScannerWatchEnabled = true };
+        var model = new MainViewModel { ScannerWatchEnabled = true, ScannerCreatedAfter = DateTimeOffset.MinValue };
         model.SetScannerFolder(inbox);
         var templates = Path.Combine(folder, "templates.json");
         TitleTemplate.Defaults[0].Save(templates, newFile: true);
@@ -177,7 +180,7 @@ public sealed class RecognitionTests : IDisposable
         var secondPath = Path.Combine(inbox, "b.pdf");
         File.Copy(Pdf(Sheet(595, 842, 0)), firstPath);
         File.Copy(Pdf(Sheet(595, 842, 0, "ABCD.123456.002")), secondPath);
-        var model = new MainViewModel { ScannerWatchEnabled = true };
+        var model = new MainViewModel { ScannerWatchEnabled = true, ScannerCreatedAfter = DateTimeOffset.MinValue };
         model.SetScannerFolder(inbox);
         model.PropertyChanged += (_, e) =>
         {
@@ -199,6 +202,135 @@ public sealed class RecognitionTests : IDisposable
         Assert.Same(completed, first.Result);
         Assert.Equal("ABCD.123456.002", second.Designation);
         Assert.Equal("Проверить", second.Status);
+    }
+
+    [Fact]
+    public async Task ScannerSplitsBeforeManualRecognitionAndMergesInStampOrder()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var source = Path.Combine(inbox, "Пачка.pdf");
+        var continuation = ContinuationSheet(595, 842, 0, left: false);
+        continuation = continuation with { Content = continuation.Content.Replace("Group A", "ABCD.123456.001") };
+        var firstSheet = NumberedSheet("ABCD.123456.001", 1);
+        File.Copy(Pdf(continuation, firstSheet, NumberedSheet("ABCD.123456.002", 1)), source);
+        var original = RenameService.Hash(source);
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"))
+        {
+            OcrEnabled = false, SplitScanBatches = true, ScannerWatchEnabled = true,
+            ScannerCreatedAfter = DateTimeOffset.MinValue
+        };
+        model.SetScannerFolder(inbox);
+
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Equal(new[] { "Пачка_1.pdf", "Пачка_2.pdf", "Пачка_3.pdf" }, model.Rows.Select(row => row.OriginalName));
+        Assert.All(model.Rows, row => { Assert.Null(row.Result); Assert.True(File.Exists(row.Source)); });
+        Assert.Empty(model.MergeProposals);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Equal(3, model.Rows.Count);
+
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        var proposal = Assert.Single(model.MergeProposals);
+        Assert.Equal(new[] { "Пачка_2.pdf", "Пачка_1.pdf" }, proposal.Ordered.Select(row => row.OriginalName));
+        Assert.True(proposal.CanMerge);
+        Assert.False(model.Rows[2].InMergeProposal);
+        var second = proposal.Ordered[1];
+        second.SheetNumberText = "1";
+        Assert.False(proposal.CanMerge);
+        var result = Path.Combine(inbox, "ABCD.123456.001_MAIN HOUSING.pdf");
+        await model.MergeAsync(proposal);
+        Assert.False(File.Exists(result));
+        second.SheetNumberText = "2";
+        await model.MergeAsync(proposal);
+
+        using var merged = UglyToad.PdfPig.PdfDocument.Open(result);
+        Assert.Equal(2, merged.NumberOfPages);
+        Assert.Contains("HOUSING", merged.GetPage(1).Text);
+        Assert.DoesNotContain("HOUSING", merged.GetPage(2).Text);
+        Assert.Equal(original, RenameService.Hash(source));
+        Assert.All(proposal.Pages, row => Assert.True(File.Exists(row.Source)));
+        Assert.Empty(model.MergeProposals);
+
+        var restarted = new MainViewModel(Path.Combine(folder, "settings.json"))
+        {
+            OcrEnabled = false, SplitScanBatches = true, ScannerWatchEnabled = true,
+            ScannerCreatedAfter = DateTimeOffset.MinValue
+        };
+        restarted.SetScannerFolder(inbox);
+        await restarted.CheckScannerFolderAsync(() => true);
+        await restarted.CheckScannerFolderAsync(() => true);
+        Assert.Equal(new[] { "Пачка_1.pdf", "Пачка_2.pdf", "Пачка_3.pdf" }, restarted.Rows.Select(row => row.OriginalName));
+        Assert.Empty(restarted.MergeProposals);
+        Assert.Equal(5, Directory.GetFiles(inbox, "*.pdf").Length);
+    }
+
+    [Fact]
+    public async Task ScannerIdentifiesSheetNumbersOnRasterScans()
+    {
+        var batch = Path.Combine(folder, "raster.pdf");
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "scan-numbered-batch.pdf"), batch);
+        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { SplitScanBatches = true };
+        await model.AddDocumentsAsync([batch]);
+        Assert.Empty(model.MergeProposals);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        var proposal = Assert.Single(model.MergeProposals);
+        Assert.Equal(new int?[] { 2, 1 }, proposal.Pages.Select(row => row.SheetNumber));
+        Assert.True(proposal.CanMerge);
+        Assert.Equal(new[] { "raster_2.pdf", "raster_1.pdf" }, proposal.Ordered.Select(row => row.OriginalName));
+    }
+
+    [Fact]
+    public async Task ScannerUsesCreationTimeAndUpdatesCutoffWhenReenabled()
+    {
+        var input = Pdf(Sheet(595, 842, 0));
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var oldFile = Path.Combine(inbox, "old.pdf");
+        var newFile = Path.Combine(inbox, "new.pdf");
+        var model = new MainViewModel { OcrEnabled = false, SplitScanBatches = true };
+        model.SetScannerFolder(inbox);
+        var before = DateTimeOffset.Now;
+        model.ScannerWatchEnabled = true;
+        Assert.InRange(model.ScannerCreatedAfter!.Value, before, DateTimeOffset.Now);
+        var old = DateTimeOffset.Now.AddDays(-2);
+        File.Copy(input, oldFile);
+        File.SetCreationTimeUtc(oldFile, old.UtcDateTime);
+        File.Copy(input, newFile);
+        File.SetLastWriteTimeUtc(newFile, old.UtcDateTime);
+        File.SetCreationTimeUtc(newFile, model.ScannerCreatedAfter.Value.AddMinutes(1).UtcDateTime);
+
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Equal(newFile, Assert.Single(model.Rows).Source);
+        model.ScannerCreatedAfter = old.AddMinutes(-1);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Contains(model.Rows, row => row.Source == oldFile);
+
+        model.ScannerWatchEnabled = false;
+        model.ScannerWatchEnabled = true;
+        Assert.True(model.ScannerCreatedAfter > old);
+    }
+
+    [Fact]
+    public void SplittingWithANameCollisionPreservesEveryExistingFile()
+    {
+        var source = Pdf(NumberedSheet("ABCD.123456.001", 1), NumberedSheet("ABCD.123456.001", 2));
+        var first = Path.ChangeExtension(source, null) + "_1.pdf";
+        var collision = Path.ChangeExtension(source, null) + "_2.pdf";
+        var original = RenameService.Hash(source);
+        File.WriteAllText(collision, "existing file");
+
+        Assert.Throws<IOException>(() => PdfRenderer.SplitPages(source));
+        Assert.False(File.Exists(first));
+        Assert.Equal("existing file", File.ReadAllText(collision));
+        Assert.Equal(original, RenameService.Hash(source));
+    }
+
+    private static Page NumberedSheet(string designation, int number)
+    {
+        var sheet = Sheet(595, 842, 0, designation);
+        return sheet with { Content = sheet.Content + $"\nBT /F1 8 Tf 455 62 Td ({number}) Tj ET\n" };
     }
 
     [Fact]

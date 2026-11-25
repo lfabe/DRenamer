@@ -159,58 +159,171 @@ public sealed class PdfRenderer
                 finally { Native.FPDF_ClosePage(page); }
             }
 
-            Exception? writeError = null;
-            Native.WriteBlock write = (_, data, size) =>
-            {
-                try { return WriteBlock(output, data, size); }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    writeError = ex;
-                    return 0;
-                }
-            };
-            var writer = new Native.FileWrite(1, write);
             const uint incremental = 1;
-            var saved = Native.FPDF_SaveAsCopy(document, ref writer, incremental);
-            GC.KeepAlive(write);
-            if (writeError is not null) throw new IOException("Не удалось записать PDF.", writeError);
-            if (saved == 0) throw new InvalidDataException("PDFium не смог сохранить поворот листов.");
-            return saved;
+            return Save(document, output, incremental);
         });
     }
 
-    private static T WithDocument<T>(Stream input, Func<IntPtr, T> action, CancellationToken token = default)
+    public static string[] SplitPages(string path)
+    {
+        path = Path.GetFullPath(path);
+        using var input = File.OpenRead(path);
+        return WithDocument(input, source =>
+        {
+            var count = Native.FPDF_GetPageCount(source);
+            if (count < 1) throw new InvalidDataException("В PDF нет страниц.");
+            if (count == 1) return [path];
+            var stem = Path.Combine(Path.GetDirectoryName(path)!, Path.GetFileNameWithoutExtension(path));
+            var pages = Enumerable.Range(1, count).Select(number => $"{stem}_{number}.pdf").ToArray();
+            var collision = pages.FirstOrDefault(File.Exists);
+            if (collision is not null) throw new IOException($"Файл уже существует: {Path.GetFileName(collision)}.");
+            var temporary = pages.Select(_ => Path.Combine(Path.GetDirectoryName(path)!,
+                $".drawing-renamer-{Guid.NewGuid():N}.tmp")).ToArray();
+            var written = new List<string>();
+            try
+            {
+                // Stage alongside the source so published pages can be renamed atomically.
+                for (var index = 0; index < count; index++)
+                {
+                    using var output = new FileStream(temporary[index], FileMode.CreateNew);
+                    CreatePdf(output, target => ImportPage(target, source, index, 0, 0));
+                    output.Flush(flushToDisk: true);
+                }
+                for (var index = 0; index < count; index++)
+                {
+                    File.Move(temporary[index], pages[index]);
+                    written.Add(pages[index]);
+                }
+                return pages;
+            }
+            catch
+            {
+                foreach (var page in written) File.Delete(page);
+                throw;
+            }
+            finally { foreach (var file in temporary) File.Delete(file); }
+        });
+    }
+
+    public static void MergePages(string path, IReadOnlyList<(string Path, string Hash, int Turn)> pages)
+    {
+        if (pages.Count < 2) throw new ArgumentException("Выберите хотя бы два листа PDF.", nameof(pages));
+        path = Path.GetFullPath(path);
+        var temporary = Path.Combine(Path.GetDirectoryName(path)!, $".drawing-renamer-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                WithLibrary(() => CreatePdf(output, target =>
+                {
+                    for (var index = 0; index < pages.Count; index++)
+                    {
+                        var (sourcePath, hash, turn) = pages[index];
+                        if (turn is < 0 or > 3) throw new InvalidDataException("Указан недопустимый угол поворота листа.");
+                        using var input = File.OpenRead(sourcePath);
+                        if (RenameService.Hash(input) != hash)
+                            throw new InvalidDataException($"PDF изменился: {Path.GetFileName(sourcePath)}. Распознайте его повторно.");
+                        LoadDocument(input, source =>
+                        {
+                            if (Native.FPDF_GetPageCount(source) != 1)
+                                throw new InvalidDataException("Для объединения выберите одностраничные PDF.");
+                            ImportPage(target, source, 0, index, turn);
+                            return true;
+                        });
+                    }
+                }), default);
+                output.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, path);
+        }
+        finally { File.Delete(temporary); }
+    }
+
+    private static int CreatePdf(Stream output, Action<IntPtr> populate)
+    {
+        var document = Native.FPDF_CreateNewDocument();
+        if (document == IntPtr.Zero) throw new InvalidDataException("Не удалось создать PDF.");
+        try
+        {
+            populate(document);
+            return Save(document, output, 0);
+        }
+        finally { Native.FPDF_CloseDocument(document); }
+    }
+
+    private static void ImportPage(IntPtr target, IntPtr source, int sourceIndex, int targetIndex, int turn)
+    {
+        const uint assemblePages = 1 << 10;
+        const uint modifyContents = 1 << 3;
+        var permission = Native.FPDF_GetSecurityHandlerRevision(source) < 3 ? modifyContents : assemblePages;
+        if ((Native.FPDF_GetDocPermissions(source) & permission) == 0)
+            throw new InvalidDataException("Защита PDF запрещает извлекать листы.");
+        if (Native.FPDF_ImportPagesByIndex(target, source, in sourceIndex, 1, targetIndex) == 0)
+            throw new InvalidDataException("Не удалось скопировать лист PDF.");
+        if (turn == 0) return;
+        var page = Native.FPDF_LoadPage(target, targetIndex);
+        if (page == IntPtr.Zero) throw new InvalidDataException("Не удалось повернуть лист PDF.");
+        try { Native.FPDFPage_SetRotation(page, (Native.FPDFPage_GetRotation(page) + turn) % 4); }
+        finally { Native.FPDF_ClosePage(page); }
+    }
+
+    private static int Save(IntPtr document, Stream output, uint flags)
+    {
+        Exception? writeError = null;
+        Native.WriteBlock write = (_, data, size) =>
+        {
+            try { return WriteBlock(output, data, size); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                writeError = ex;
+                return 0;
+            }
+        };
+        var writer = new Native.FileWrite(1, write);
+        var saved = Native.FPDF_SaveAsCopy(document, ref writer, flags);
+        GC.KeepAlive(write);
+        if (writeError is not null) throw new IOException("Не удалось записать PDF.", writeError);
+        if (saved == 0) throw new InvalidDataException("PDFium не смог сохранить документ.");
+        return saved;
+    }
+
+    private static T WithDocument<T>(Stream input, Func<IntPtr, T> action, CancellationToken token = default) =>
+        WithLibrary(() => LoadDocument(input, action), token);
+
+    private static T WithLibrary<T>(Func<T> action, CancellationToken token)
     {
         lock (Gate)
         {
             token.ThrowIfCancellationRequested();
             Native.FPDF_InitLibrary();
+            try { return action(); }
+            finally { Native.FPDF_DestroyLibrary(); }
+        }
+    }
+
+    private static T LoadDocument<T>(Stream input, Func<IntPtr, T> action)
+    {
+        if (input.Length > uint.MaxValue)
+            throw new InvalidDataException("PDF превышает 4 ГиБ.");
+        Native.ReadBlock read = (_, position, buffer, size) =>
+        {
             try
             {
-                if (input.Length > uint.MaxValue)
-                    throw new InvalidDataException("PDF превышает 4 ГиБ.");
-                Native.ReadBlock read = (_, position, buffer, size) =>
-                {
-                    try
-                    {
-                        input.Position = position;
-                        return ReadBlock(input, buffer, size);
-                    }
-                    catch (IOException) { return 0; }
-                };
-                var access = new Native.FileAccess((uint)input.Length, read, IntPtr.Zero);
-                var document = Native.FPDF_LoadCustomDocument(ref access, IntPtr.Zero);
-                if (document == IntPtr.Zero)
-                    throw new InvalidDataException(Native.FPDF_GetLastError() == 4
-                        ? "PDF защищён паролем." : "PDFium не смог открыть документ.");
-                try { return action(document); }
-                finally
-                {
-                    Native.FPDF_CloseDocument(document);
-                    GC.KeepAlive(read);
-                }
+                input.Position = position;
+                return ReadBlock(input, buffer, size);
             }
-            finally { Native.FPDF_DestroyLibrary(); }
+            catch (IOException) { return 0; }
+        };
+        var access = new Native.FileAccess((uint)input.Length, read, IntPtr.Zero);
+        var document = Native.FPDF_LoadCustomDocument(ref access, IntPtr.Zero);
+        if (document == IntPtr.Zero)
+            throw new InvalidDataException(Native.FPDF_GetLastError() == 4
+                ? "PDF защищён паролем." : "PDFium не смог открыть документ.");
+        try { return action(document); }
+        finally
+        {
+            Native.FPDF_CloseDocument(document);
+            GC.KeepAlive(read);
         }
     }
 
@@ -289,6 +402,9 @@ public sealed class PdfRenderer
         [DllImport(Dll)] public static extern int FPDFPage_GetRotation(IntPtr page);
         [DllImport(Dll)] public static extern void FPDFPage_SetRotation(IntPtr page, int turns);
         [DllImport(Dll)] public static extern int FPDF_SaveAsCopy(IntPtr document, ref FileWrite writer, uint flags);
+        [DllImport(Dll)] public static extern IntPtr FPDF_CreateNewDocument();
+        [DllImport(Dll)] public static extern int FPDF_ImportPagesByIndex(IntPtr target, IntPtr source,
+            in int pageIndex, uint length, int targetIndex);
         [DllImport(Dll)] public static extern float FPDF_GetPageWidthF(IntPtr page);
         [DllImport(Dll)] public static extern float FPDF_GetPageHeightF(IntPtr page);
         [DllImport(Dll)] public static extern IntPtr FPDFBitmap_Create(int width, int height, int alpha);

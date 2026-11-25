@@ -12,6 +12,18 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] public partial int ThemeIndex { get; set; }
     [ObservableProperty] public partial string SettingsMessage { get; set; } = "";
     [ObservableProperty] public partial bool ScannerWatchEnabled { get; set; }
+    [ObservableProperty] public partial bool SplitScanBatches { get; set; }
+    [ObservableProperty] public partial DateTimeOffset? ScannerCreatedAfter { get; set; }
+    public DateTimeOffset ScannerStartDate
+    {
+        get => (ScannerCreatedAfter ?? DateTimeOffset.Now).ToLocalTime();
+        set => SetScannerStart(value.Date + ScannerStartTime);
+    }
+    public TimeSpan ScannerStartTime
+    {
+        get => ScannerStartDate.TimeOfDay;
+        set => SetScannerStart(ScannerStartDate.Date + value);
+    }
     public bool HasScannerFolder => scannerInbox is not null;
     public string ScannerFolderLabel => scannerInbox?.Folder ?? "Папка не выбрана";
     public int LanguageIndex
@@ -30,7 +42,7 @@ public sealed partial class MainViewModel : ObservableObject
         return WorkAsync(async () =>
         {
             var settings = new AppSettings(ThemeIndex, SeparatorInput, OcrEnabled, Languages, TemplatePath,
-                scannerInbox?.Folder, ScannerWatchEnabled);
+                scannerInbox?.Folder, ScannerWatchEnabled, ScannerCreatedAfter, SplitScanBatches);
             if (await SaveSettingsFileAsync(settings)) ReportSettings("Настройки сохранены.");
         });
     }
@@ -74,6 +86,9 @@ public sealed partial class MainViewModel : ObservableObject
         SetTemplates(null);
         SetScannerFolder(settings.ScannerFolder);
         ScannerWatchEnabled = HasScannerFolder && settings.ScannerWatchEnabled;
+        if (settings.ScannerCreatedAfter is not null || !ScannerWatchEnabled)
+            ScannerCreatedAfter = settings.ScannerCreatedAfter;
+        SplitScanBatches = settings.SplitScanBatches;
     }
 
     private async Task<bool> SaveSettingsFileAsync(AppSettings settings)
@@ -94,10 +109,33 @@ public sealed partial class MainViewModel : ObservableObject
     partial void OnThemeIndexChanged(int value) => SettingsMessage = "";
     partial void OnOcrEnabledChanged(bool value) => SettingsMessage = "";
     partial void OnLanguagesChanged(string value) => SettingsMessage = "";
+    partial void OnSplitScanBatchesChanged(bool value)
+    {
+        SettingsMessage = "";
+        if (!value)
+        {
+            foreach (var row in Rows) row.MergeEligible = false;
+            RefreshMergeProposals();
+        }
+    }
+    partial void OnScannerWatchEnabledChanged(bool value)
+    {
+        if (value) ScannerCreatedAfter = DateTimeOffset.Now;
+        SettingsMessage = "";
+    }
+
+    private void SetScannerStart(DateTime local)
+    {
+        if (TimeZoneInfo.Local.IsInvalidTime(local)) return;
+        ScannerCreatedAfter = new DateTimeOffset(local, TimeZoneInfo.Local.GetUtcOffset(local));
+        SettingsMessage = "";
+    }
+
     private readonly DrawingAnalyzer analyzer = new();
     private readonly HashSet<string> folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> individualFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> excludedFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ScannerInbox.FileVersion> handledBatches = new(StringComparer.OrdinalIgnoreCase);
     private ScannerInbox? scannerInbox;
     private bool checkingScanner;
     private CancellationTokenSource? cancellation;
@@ -106,6 +144,7 @@ public sealed partial class MainViewModel : ObservableObject
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DrawingRenamer");
     public RenameService Renamer { get; internal init; } = new(Path.Combine(DataFolder, "history.json"));
     public ObservableCollection<DocumentRow> Rows { get; } = [];
+    [ObservableProperty] internal partial IReadOnlyList<MergeProposal> MergeProposals { get; set; } = [];
     public bool HasDocumentSources => folders.Count > 0 || individualFiles.Count > 0;
     public bool CanUndo { get; private set; }
     public bool IsAnalyzing => cancellation is not null;
@@ -169,6 +208,14 @@ public sealed partial class MainViewModel : ObservableObject
         var pdfs = files.Where(IsPdf).Select(path => Path.GetFullPath(path)).ToArray();
         var sources = directories.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path))).ToArray();
         excludedFiles.ExceptWith(pdfs);
+        if (SplitScanBatches && sources.Length == 0)
+            return WorkAsync(async () =>
+            {
+                var (prepared, warning) = await PrepareBatchFilesAsync(pdfs);
+                individualFiles.UnionWith(prepared);
+                var count = AddRows(prepared);
+                Message = $"Добавлено: {count}. В очереди: {Rows.Count}. {warning}".TrimEnd();
+            });
         individualFiles.UnionWith(pdfs);
         if (sources.Length > 0)
         {
@@ -198,12 +245,27 @@ public sealed partial class MainViewModel : ObservableObject
         checkingScanner = true;
         try
         {
-            var ignored = Rows.Where(row => !IsPending(row)).Select(row => row.Source)
+            var split = SplitScanBatches;
+            var cutoff = ScannerCreatedAfter?.UtcDateTime;
+            var handled = split ? new Dictionary<string, ScannerInbox.FileVersion>(handledBatches, StringComparer.OrdinalIgnoreCase) : null;
+            var ignored = Rows.Where(row => split || !IsPending(row)).Select(row => row.Source)
                 .Concat(excludedFiles).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var paths = await Task.Run(() => inbox.FindReadyFiles(ignored));
-            if (!CanScan() || scannerInbox != inbox || paths.Length == 0) return;
+            var paths = await Task.Run(() => inbox.FindReadyFiles(ignored, cutoff, handled));
+            if (!CanScan() || scannerInbox != inbox || split != SplitScanBatches || cutoff != ScannerCreatedAfter?.UtcDateTime || paths.Length == 0) return;
 
             var ready = paths.Where(path => !excludedFiles.Contains(path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (split)
+            {
+                await WorkAsync(async () =>
+                {
+                    var (prepared, warning) = await PrepareBatchFilesAsync(ready);
+                    individualFiles.UnionWith(prepared);
+                    var count = AddRows(prepared);
+                    if (count > 0 || warning is not null)
+                        Message = $"Добавлено: {count}. Нажмите «Распознать». {warning}".TrimEnd();
+                });
+                return;
+            }
             AddRows(ready);
             var batch = Rows.Where(row => ready.Contains(row.Source) && IsPending(row)).ToArray();
             individualFiles.UnionWith(batch.Select(row => row.Source));
@@ -215,7 +277,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
         finally { checkingScanner = false; }
 
-        bool CanScan() => ScannerWatchEnabled && OcrEnabled && !Busy && canStart();
+        bool CanScan() => ScannerWatchEnabled && (OcrEnabled || SplitScanBatches) && !Busy && canStart();
         static bool IsPending(DocumentRow row) => row.Included && row.Status == "В очереди";
     }
 
@@ -241,6 +303,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         if (removed is null) return;
+        RefreshMergeProposals();
         if (activeIndex >= 0 && active is not null && targets.Contains(active))
             Selected = Rows.Count == 0 ? null : Rows[Math.Min(nextIndex, Rows.Count - 1)];
         Message = count == 1 ? $"Удалено из списка: {removed.OriginalName}." : $"Удалено из списка: {count}.";
@@ -289,6 +352,18 @@ public sealed partial class MainViewModel : ObservableObject
                 }
                 return discovered;
             });
+            string? warning = null;
+            if (SplitScanBatches)
+            {
+                var existing = Rows.Select(row => row.Source).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var originals = paths.Where(path => !existing.Contains(path)).ToArray();
+                var prepared = await PrepareBatchFilesAsync(originals);
+                paths.ExceptWith(originals);
+                individualFiles.ExceptWith(originals);
+                paths.UnionWith(prepared.Paths);
+                individualFiles.UnionWith(prepared.Paths);
+                warning = prepared.Warning;
+            }
             var selected = Selected;
             foreach (var row in Rows.Where(row => !paths.Contains(row.Source)).ToArray())
                 Rows.Remove(row);
@@ -296,20 +371,150 @@ public sealed partial class MainViewModel : ObservableObject
             var versions = await Task.Run(() => reviewed.Select(row => ReadVersion(row.Source)).ToArray());
             for (var i = 0; i < reviewed.Length; i++) reviewed[i].ObserveVersion(versions[i]);
             AddRows(paths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
+            RefreshMergeProposals();
             Selected = selected is not null && Rows.Contains(selected) ? selected : Rows.FirstOrDefault();
-            Message = $"Найдено документов: {Rows.Count}.";
+            Message = $"Найдено документов: {Rows.Count}. {warning}".TrimEnd();
         });
     }
+
+    private async Task<(string[] Paths, string? Warning)> PrepareBatchFilesAsync(IEnumerable<string> paths)
+    {
+        var files = paths.ToArray();
+        var result = await Task.Run(() =>
+        {
+            var ready = new List<string>();
+            string? warning = null;
+            foreach (var path in files)
+            {
+                try
+                {
+                    using var input = File.OpenRead(path);
+                    var version = new ScannerInbox.FileVersion(new FileInfo(path));
+                    if (handledBatches.TryGetValue(path, out var previous) && previous == version) continue;
+                    var receipt = BatchReceipt(path);
+                    if (File.Exists(receipt) && File.ReadAllText(receipt) == RenameService.Hash(input))
+                    {
+                        handledBatches[path] = version;
+                        continue;
+                    }
+                    var pages = PdfRenderer.SplitPages(path);
+                    ready.AddRange(pages);
+                    if (pages.Length > 1)
+                    {
+                        try { RememberBatchFile(path, input); }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            warning = $"Не удалось сохранить отметку о разделении {Path.GetFileName(path)} для следующего сеанса.";
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+                {
+                    warning = $"Не удалось разделить {Path.GetFileName(path)}. {ex.Message}";
+                }
+            }
+            return (ready, warning);
+        });
+        return (result.ready.Where(path => !excludedFiles.Contains(path)).ToArray(), result.warning);
+    }
+
+    private string BatchReceipt(string path)
+    {
+        var key = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(path.ToUpperInvariant()));
+        return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(settingsPath))!, "batch-receipts", Convert.ToHexString(key));
+    }
+
+    private void RememberBatchFile(string path, Stream input)
+    {
+        handledBatches[path] = new(new FileInfo(path));
+        var receipt = BatchReceipt(path);
+        Directory.CreateDirectory(Path.GetDirectoryName(receipt)!);
+        input.Position = 0;
+        File.WriteAllText(receipt, RenameService.Hash(input));
+    }
+
+    internal void RefreshMergeProposals()
+    {
+        var proposals = Rows.Where(row => row.MergeEligible && row.SourceHash is not null && !string.IsNullOrWhiteSpace(row.Designation))
+            .GroupBy(row => Path.GetDirectoryName(row.Source), StringComparer.OrdinalIgnoreCase)
+            .SelectMany(folder => folder.GroupBy(row => row.Designation.Trim(), StringComparer.OrdinalIgnoreCase))
+            .Where(group => group.Count() > 1)
+            .Select(group => new MergeProposal(group.ToArray())).ToArray();
+        var grouped = proposals.SelectMany(proposal => proposal.Pages).ToHashSet();
+        foreach (var row in Rows) row.InMergeProposal = grouped.Contains(row);
+        if (proposals.Length > 0 || MergeProposals.Count > 0) MergeProposals = proposals;
+    }
+
+    internal Task MergeAsync(MergeProposal proposal) => WorkAsync(async () =>
+    {
+        var current = MergeProposals.FirstOrDefault(group => group.Pages.Contains(proposal.Pages[0]));
+        if (current is null || !current.CanMerge || current.FileName is not { } fileName || SeparatorError is not null)
+        {
+            Message = "Укажите корректное имя и номера листов без пропусков или повторов.";
+            return;
+        }
+        if (current.Pages.Any(row => !Rows.Contains(row) || !row.MergeEligible ||
+            !string.Equals(row.Designation.Trim(), current.Designation, StringComparison.OrdinalIgnoreCase)))
+        {
+            RefreshMergeProposals();
+            Message = "Состав группы изменился. Проверьте листы и выберите предложение заново.";
+            return;
+        }
+
+        var ordered = current.Ordered;
+        var output = Path.Combine(Path.GetDirectoryName(ordered[0].Source)!, fileName);
+        var inputs = ordered.Select(row => (row.Source, row.SourceHash!, row.PageRotations.GetValueOrDefault(1))).ToArray();
+        try { await Task.Run(() => PdfRenderer.MergePages(output, inputs)); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            Message = $"Не удалось объединить листы. {ex.Message}";
+            return;
+        }
+
+        string? warning = null;
+        try
+        {
+            await Task.Run(() =>
+            {
+                using var input = File.OpenRead(output);
+                RememberBatchFile(output, input);
+            });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            warning = "Не удалось сохранить отметку о готовом PDF для следующего сеанса.";
+        }
+
+        foreach (var row in ordered)
+        {
+            excludedFiles.Add(row.Source);
+            individualFiles.Remove(row.Source);
+            Rows.Remove(row);
+        }
+        individualFiles.Add(output);
+        var merged = new DocumentRow(output)
+        {
+            Designation = current.Designation,
+            DocumentName = ordered.First(row => row.NewName == fileName).DocumentName,
+            Included = false,
+            Status = "Объединён",
+            Diagnostic = "Итоговый PDF сохранён."
+        };
+        Rows.Add(merged);
+        RefreshMergeProposals();
+        Selected = merged;
+        Message = $"Объединено листов: {ordered.Length}. Создан файл {fileName}. {warning}".TrimEnd();
+    });
 
     private static bool IsPdf(string path) => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase);
 
     [RelayCommand]
-    private Task AnalyzeAsync() => AnalyzeRowsAsync(Rows.Where(r => r.Included).ToArray(), false);
+    private Task AnalyzeAsync() => AnalyzeRowsAsync(Rows.Where(r => r.Included).ToArray(), false, proposeMerges: SplitScanBatches);
 
     public Task AnalyzeDocumentAsync(DocumentRow row) => Rows.Contains(row)
         ? AnalyzeRowsAsync([row], true) : Task.CompletedTask;
 
-    private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force, bool requireReview = false)
+    private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force, bool requireReview = false, bool proposeMerges = false)
     {
         if (Busy || batch.Length == 0) return;
         using var operation = new CancellationTokenSource();
@@ -338,17 +543,27 @@ public sealed partial class MainViewModel : ObservableObject
                         continue;
                     }
                     Message = $"Анализ {index + 1} из {batch.Length} · {row.OriginalName}";
-                    var result = await Task.Run(() => analyzer.Analyze(row.Source, options, operation.Token));
+                    var result = await Task.Run(() => analyzer.Analyze(row.Source,
+                        options with { ReadSheetNumber = proposeMerges }, operation.Token));
                     if (requireReview && result.Status == RecognitionStatus.Ready)
                         result = result with { Status = RecognitionStatus.Review, Diagnostic = "Проверьте обе графы и подтвердите значения." };
                     row.Apply(result);
                     processed++;
                     Progress = 100d * (index + 1) / batch.Length;
                 }
-                Message = $"Распознано: {processed}. Сохранено подтверждённых: {batch.Length - processed}.";
+                if (proposeMerges)
+                    foreach (var row in batch) row.MergeEligible = row.Result?.PageCount == 1;
+                RefreshMergeProposals();
+                Message = MergeProposals.Count == 0
+                    ? $"Распознано: {processed}. Сохранено подтверждённых: {batch.Length - processed}."
+                    : $"Распознано: {processed}. Предложения к объединению: {MergeProposals.Count}.";
             });
         }
-        finally { cancellation = null; }
+        finally
+        {
+            cancellation = null;
+            if (operation.IsCancellationRequested) RefreshMergeProposals();
+        }
     }
 
     [RelayCommand]
@@ -368,6 +583,7 @@ public sealed partial class MainViewModel : ObservableObject
             });
             if (!row.ObserveVersion(hash) || candidate is null) { Message = row.Diagnostic; return; }
             row.Use(candidate);
+            RefreshMergeProposals();
             Message = "Проверьте результат и подтвердите значения.";
         });
     }
@@ -465,8 +681,12 @@ public sealed partial class MainViewModel : ObservableObject
                     _ => "Ошибка"
                 };
                 if (result.Status is MoveStatus.Moved or MoveStatus.Undone or MoveStatus.Copied or MoveStatus.CopyRemoved)
+                {
                     row.Included = false;
+                    row.MergeEligible = false;
+                }
             }
+            RefreshMergeProposals();
             Message = results.Count == 0 ? "Нет выполненных операций." :
                 $"Выполнено: {results.Count(r => r.Status is MoveStatus.Moved or MoveStatus.Undone or MoveStatus.Copied or MoveStatus.CopyRemoved)} из {results.Count}.";
             if (journalWarning is not null) Message = $"{journalWarning} {Message}";

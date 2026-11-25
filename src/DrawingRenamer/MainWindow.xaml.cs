@@ -37,6 +37,9 @@ public sealed partial class MainWindow : Window
     private bool choosingDocuments;
     private bool refreshingCandidates;
     private bool settingsLoaded;
+    private bool syncingScannerCutoff;
+    private bool refreshingDocumentRows;
+    private readonly HashSet<string> collapsedMergeGroups = new(StringComparer.OrdinalIgnoreCase);
     private bool CanChangeDocuments => !closing && !ViewModel.Busy && !renaming && !choosingDocuments;
     private int PreviewTurn => (int)SheetRotation.Angle / 90;
     private int RegionTurn => (PreviewTurn + Orientation.SelectedIndex) & 3;
@@ -45,6 +48,8 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Documents.ItemsSource = ViewModel.Rows;
+        UpdateScannerCutoff();
         ApplyTheme();
         PreviewScroll.ViewChanged += (_, _) =>
         {
@@ -60,7 +65,7 @@ public sealed partial class MainWindow : Window
         AppWindow.Resize(new(1320, 820));
         ViewModel.PropertyChanged += ViewModelChanged;
         ViewModel.AnalyzeCommand.PropertyChanged += (_, _) => UpdateCommands();
-        ViewModel.Rows.CollectionChanged += (_, _) => UpdateCommands();
+        ViewModel.Rows.CollectionChanged += (_, _) => RefreshDocumentRows();
         var scannerTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         scannerTimer.Tick += async (_, _) => await ViewModel.CheckScannerFolderAsync(() => CanChangeDocuments);
         scannerTimer.Start();
@@ -91,6 +96,8 @@ public sealed partial class MainWindow : Window
         if (e.PropertyName is nameof(ViewModel.Busy) or nameof(ViewModel.SeparatorError)) UpdateCommands();
         if (e.PropertyName == nameof(ViewModel.ThemeIndex)) ApplyTheme();
         if (e.PropertyName == nameof(ViewModel.Recursive)) await RefreshDocumentsAsync();
+        if (e.PropertyName == nameof(ViewModel.ScannerCreatedAfter)) UpdateScannerCutoff();
+        if (e.PropertyName == nameof(ViewModel.MergeProposals)) RefreshDocumentRows();
     }
 
     private async void RefreshDocuments(object sender, RoutedEventArgs e) => await RefreshDocumentsAsync();
@@ -106,9 +113,11 @@ public sealed partial class MainWindow : Window
         RecursiveCheckBox.IsEnabled = available;
         RefreshButton.IsEnabled = available && ViewModel.HasDocumentSources;
         AnalyzeButton.IsEnabled = available && ViewModel.Rows.Count > 0;
-        ConfirmButton.IsEnabled = available && Documents.SelectedItems.Count > 0;
+        ConfirmButton.IsEnabled = available && Documents.SelectedItems.OfType<DocumentRow>().Any(row => row.IsFile);
+        MergeButton.Visibility = ViewModel.MergeProposals.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        MergeButton.IsEnabled = available && SelectedMergeGroup()?.CanMerge == true && ViewModel.SeparatorError is null;
         CancelButton.Visibility = ViewModel.Busy && ViewModel.IsAnalyzing ? Visibility.Visible : Visibility.Collapsed;
-        RenameButton.IsEnabled = available && ViewModel.Rows.Count > 0 && ViewModel.SeparatorError is null;
+        RenameButton.IsEnabled = available && ViewModel.Rows.Any(row => !row.InMergeProposal) && ViewModel.SeparatorError is null;
         SeparatorInput.IsEnabled = available;
         SettingsContainer.IsEnabled = available;
         SaveSettingsButton.IsEnabled = available && ViewModel.SeparatorError is null;
@@ -235,6 +244,29 @@ public sealed partial class MainWindow : Window
         if (CanChangeDocuments) await ViewModel.ResetSettingsAsync();
     }
 
+    private void UpdateScannerCutoff()
+    {
+        syncingScannerCutoff = true;
+        try
+        {
+            ScannerStartDatePicker.Date = ViewModel.ScannerStartDate;
+            ScannerStartTimePicker.Time = ViewModel.ScannerStartTime;
+        }
+        finally { syncingScannerCutoff = false; }
+    }
+
+    private void ScannerStartDateChanged(CalendarDatePicker sender, CalendarDatePickerDateChangedEventArgs e)
+    {
+        if (syncingScannerCutoff) return;
+        if (e.NewDate is { } date) ViewModel.ScannerStartDate = date;
+        else UpdateScannerCutoff();
+    }
+
+    private void ScannerStartTimeChanged(object sender, TimePickerValueChangedEventArgs e)
+    {
+        if (!syncingScannerCutoff) ViewModel.ScannerStartTime = e.NewTime;
+    }
+
     private void ApplyTheme() => Root.RequestedTheme = ViewModel.ThemeIndex switch
     {
         1 => ElementTheme.Light,
@@ -264,16 +296,114 @@ public sealed partial class MainWindow : Window
         Documents.Focus(FocusState.Keyboard);
     }
 
+    private MergeProposal? SelectedMergeGroup()
+    {
+        if (Documents.SelectedItem is not DocumentRow selected) return null;
+        var member = selected.MergeProposal?.Pages[0] ?? selected;
+        return ViewModel.MergeProposals.FirstOrDefault(proposal => proposal.Pages.Contains(member));
+    }
+
+    private async void RefreshDocumentRows(DocumentRow? preferred = null)
+    {
+        if (refreshingDocumentRows) return;
+        var wasFlat = ReferenceEquals(Documents.ItemsSource, ViewModel.Rows);
+        if (ViewModel.MergeProposals.Count == 0 && wasFlat)
+        {
+            UpdateCommands();
+            return;
+        }
+
+        var selected = preferred ?? Documents.SelectedItem as DocumentRow ?? ViewModel.Selected;
+        var additionalSelection = preferred is null
+            ? Documents.SelectedItems.OfType<DocumentRow>().Where(row => row.IsFile && row != selected).ToArray()
+            : [];
+        var selectedMember = selected?.MergeProposal?.Pages[0] ?? selected;
+        var members = new Dictionary<DocumentRow, MergeProposal>();
+        foreach (var proposal in ViewModel.MergeProposals)
+            foreach (var row in proposal.Pages) members[row] = proposal;
+        var headers = new Dictionary<MergeProposal, DocumentRow>();
+        var visible = new List<DocumentRow>();
+        foreach (var row in ViewModel.Rows)
+        {
+            if (!members.TryGetValue(row, out var proposal))
+            {
+                visible.Add(row);
+                continue;
+            }
+            if (headers.ContainsKey(proposal)) continue;
+            var folder = Path.GetDirectoryName(proposal.Pages[0].Source)!;
+            var expanded = !collapsedMergeGroups.Contains(Path.Combine(folder, proposal.Designation));
+            var header = new DocumentRow(proposal.Label)
+            {
+                MergeProposal = proposal, MergeExpanded = expanded, InMergeProposal = true,
+                Status = proposal.CanMerge ? "К объединению" : "Проверить порядок"
+            };
+            visible.Add(header);
+            headers.Add(proposal, header);
+            if (expanded) visible.AddRange(proposal.Ordered.Where(ViewModel.Rows.Contains));
+        }
+
+        var next = visible.Contains(selected!) ? selected : null;
+        if ((next is null || (wasFlat && additionalSelection.Length == 0)) && selectedMember is not null &&
+            members.TryGetValue(selectedMember, out var selectedGroup))
+            headers.TryGetValue(selectedGroup, out next);
+        refreshingDocumentRows = true;
+        try
+        {
+            Documents.ItemsSource = headers.Count == 0 ? ViewModel.Rows : visible;
+            Documents.SelectedItem = next ?? visible.FirstOrDefault();
+            foreach (var row in additionalSelection.Where(visible.Contains))
+                if (!Documents.SelectedItems.Contains(row)) Documents.SelectedItems.Add(row);
+        }
+        finally { refreshingDocumentRows = false; }
+        await UpdateDocumentSelectionAsync();
+    }
+
+    private void ToggleMergeGroup(object sender, RoutedEventArgs e)
+    {
+        if (!CanChangeDocuments || sender is not Button { Tag: DocumentRow { MergeProposal: { } proposal } header }) return;
+        var key = Path.Combine(Path.GetDirectoryName(proposal.Pages[0].Source)!, proposal.Designation);
+        if (!collapsedMergeGroups.Add(key)) collapsedMergeGroups.Remove(key);
+        RefreshDocumentRows(header);
+    }
+
+    private async void MergeSelected(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments && SelectedMergeGroup() is { } proposal) await ViewModel.MergeAsync(proposal);
+    }
+
+    private void MergeFieldsChanged(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments && current?.MergeEligible == true) ViewModel.RefreshMergeProposals();
+    }
+
     private async void SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!refreshingDocumentRows) await UpdateDocumentSelectionAsync();
+    }
+
+    private async Task UpdateDocumentSelectionAsync()
     {
         UpdateCommands();
         var selected = Documents.SelectedItem as DocumentRow;
+        var group = SelectedMergeGroup();
+        MergeDetails.Visibility = group is null ? Visibility.Collapsed : Visibility.Visible;
+        if (group is not null)
+        {
+            MergeOrder.Text = string.Join(Environment.NewLine, group.Ordered.Select(row =>
+                $"Лист {row.SheetNumber?.ToString() ?? "—"}   {row.OriginalName}"));
+            MergeDestination.Text = $"Итоговый файл: {group.Label}";
+        }
+        SheetNumberInput.Visibility = selected is { IsFile: true, MergeEligible: true } ? Visibility.Visible : Visibility.Collapsed;
+        Editor.Visibility = selected is { IsFile: true } ? Visibility.Visible : Visibility.Collapsed;
+        RegionControls.Visibility = PageImage.Source is not null ? Editor.Visibility : Visibility.Collapsed;
+        UpdateRegionGuidance();
+        if (selected is { IsMergeHeader: true }) selected = group?.Ordered.FirstOrDefault();
         if (current == selected) return;
         if (current is not null) current.PropertyChanged -= RowChanged;
         current = selected;
         if (current is not null) current.PropertyChanged += RowChanged;
         Editor.DataContext = current;
-        Editor.Visibility = current is null ? Visibility.Collapsed : Visibility.Visible;
         RefreshCandidates();
         await SelectPageAsync(current?.SelectedCandidate?.Page ?? 1);
     }
@@ -286,6 +416,7 @@ public sealed partial class MainWindow : Window
             await SelectPageAsync(current?.SelectedCandidate?.Page ?? 1);
         }
         if (e.PropertyName == nameof(DocumentRow.Source)) await SelectPageAsync(page);
+        if (e.PropertyName == nameof(DocumentRow.SheetNumberText)) UpdateCommands();
         if (e.PropertyName is nameof(DocumentRow.Designation) or nameof(DocumentRow.DocumentName) or nameof(DocumentRow.HasDocumentName))
             UpdateRegionGuidance();
     }
@@ -368,7 +499,7 @@ public sealed partial class MainWindow : Window
             PreviousButton.IsEnabled = page > 1;
             NextButton.IsEnabled = page < pageCount;
             PreviewMessage.Visibility = Visibility.Collapsed;
-            RegionControls.Visibility = Visibility.Visible;
+            RegionControls.Visibility = Editor.Visibility;
             UpdateRegionGuidance();
             Area? frame = null;
             if (row.SelectedCandidate is { } candidate && candidate.Page == page)
@@ -469,7 +600,8 @@ public sealed partial class MainWindow : Window
             (result.Status == RecognitionStatus.Missing ||
                 result.Candidates is [{ } candidate] &&
                 (string.IsNullOrWhiteSpace(candidate.Designation) || string.IsNullOrWhiteSpace(candidate.Name))) &&
-            (string.IsNullOrWhiteSpace(row.Designation) || !row.HasDocumentName);
+            (string.IsNullOrWhiteSpace(row.Designation) || (!row.HasDocumentName &&
+                !(row.InMergeProposal && row.SelectedCandidate?.Regions.Name.IsValid == false)));
         ManualRegionsNotice.IsOpen = RegionControls.Visibility == Visibility.Visible &&
             RegionActions.Visibility == Visibility.Collapsed && needsFields;
         ToggleRegionsButton.Visibility = ManualRegionsNotice.IsOpen ? Visibility.Collapsed : Visibility.Visible;
@@ -699,7 +831,7 @@ public sealed partial class MainWindow : Window
 
     private async Task RenameSelectedAsync()
     {
-        var selected = ViewModel.Rows.Where(row => row.Included).ToArray();
+        var selected = ViewModel.Rows.Where(row => row.Included && !row.InMergeProposal).ToArray();
         if (selected.Length == 0)
         {
             ViewModel.Message = "Отметьте файлы и подтвердите распознанные значения.";

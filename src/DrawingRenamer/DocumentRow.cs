@@ -7,17 +7,36 @@ public sealed partial class DocumentRow : ObservableObject
     public DocumentRow(string path) => Source = path;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(OriginalName))]
+    [NotifyPropertyChangedFor(nameof(OriginalName), nameof(FileLabel))]
     public partial string Source { get; set; }
 
     [ObservableProperty] public partial bool Included { get; set; } = true;
     [ObservableProperty] public partial string Designation { get; set; } = "";
     [ObservableProperty] public partial string DocumentName { get; set; } = "";
-    [ObservableProperty] public partial string Status { get; set; } = "В очереди";
-    [ObservableProperty] public partial string NewName { get; set; } = "";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(QueueStatus))]
+    public partial string Status { get; set; } = "В очереди";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(QueueNewName))]
+    public partial string NewName { get; set; } = "";
     [ObservableProperty] public partial string Diagnostic { get; set; } = "";
     [ObservableProperty] public partial bool Confirmed { get; set; }
     [ObservableProperty] public partial string Separator { get; set; } = "_";
+    [ObservableProperty] public partial string SheetNumberText { get; set; } = "";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(FileLabel), nameof(QueueNewName), nameof(QueueStatus))]
+    public partial bool InMergeProposal { get; set; }
+
+    public bool IsMergeHeader => MergeProposal is not null;
+    public bool IsFile => !IsMergeHeader;
+    public string QueueStatus => InMergeProposal && IsFile ? "" : Status;
+    public string QueueNewName => InMergeProposal ? "" : NewName;
+    public string FileLabel => InMergeProposal ? $"   ↳  {OriginalName}" : OriginalName;
+    public string GroupLabel => $"{(MergeExpanded ? "▾" : "▸")}  {MergeProposal?.Label}";
+    internal bool MergeExpanded { get; init; }
+    internal MergeProposal? MergeProposal { get; init; }
+    internal bool MergeEligible { get; set; }
+    internal int? SheetNumber => int.TryParse(SheetNumberText.Trim(), out var number) && number > 0 ? number : null;
 
     public string OriginalName => Path.GetFileName(Source);
     public RecognitionResult? Result { get; private set; }
@@ -48,6 +67,8 @@ public sealed partial class DocumentRow : ObservableObject
     public void Apply(RecognitionResult result)
     {
         if (SourceHash != result.SourceHash) PageRotations.Clear();
+        MergeEligible = false;
+        SheetNumberText = "";
         SourceHash = result.SourceHash;
         Result = result;
         SelectedCandidate = null;
@@ -74,6 +95,7 @@ public sealed partial class DocumentRow : ObservableObject
 
     public void Use(Candidate candidate)
     {
+        if (candidate.SheetNumber is { } number) SheetNumberText = number.ToString();
         SelectedCandidate = candidate;
         if (candidate.Turn == 0) PageRotations.Remove(candidate.Page);
         else PageRotations[candidate.Page] = candidate.Turn;
@@ -166,4 +188,15 @@ public sealed partial class DocumentRow : ObservableObject
         Status = "Проверить";
         Diagnostic = error ?? "Подтвердите введённые значения.";
     }
+}
+
+internal sealed class MergeProposal(DocumentRow[] pages)
+{
+    public DocumentRow[] Pages { get; } = pages;
+    public DocumentRow[] Ordered => Pages.OrderBy(page => page.SheetNumber ?? int.MaxValue).ToArray();
+    public string Designation => Pages[0].Designation.Trim();
+    public string? FileName => Ordered.Select(page => page.NewName).FirstOrDefault(name => name.Length > 0);
+    public string Label => FileName ?? $"{Designation}.pdf";
+    public bool CanMerge => FileName is not null && Ordered.Select(page => page.SheetNumber)
+        .SequenceEqual(Enumerable.Range(1, Pages.Length).Select(number => (int?)number));
 }
