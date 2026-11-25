@@ -1,7 +1,9 @@
 using System.ComponentModel;
+using System.Collections.ObjectModel;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -39,7 +41,13 @@ public sealed partial class MainWindow : Window
     private bool settingsLoaded;
     private bool syncingScannerCutoff;
     private bool refreshingDocumentRows;
-    private readonly HashSet<string> collapsedMergeGroups = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ObservableCollection<DocumentRow> visibleRows = [];
+    private readonly Dictionary<string, DocumentRow> mergeHeaders = new(StringComparer.OrdinalIgnoreCase);
+    private DocumentRow? queueDragSource;
+    private DocumentRow? queueDropTarget;
+    private Windows.Foundation.Point queueDragStart;
+    private uint queuePointerId;
+    private DocumentRow[] draggedQueueRows = [];
     private bool CanChangeDocuments => !closing && !ViewModel.Busy && !renaming && !choosingDocuments;
     private int PreviewTurn => (int)SheetRotation.Angle / 90;
     private int RegionTurn => (PreviewTurn + Orientation.SelectedIndex) & 3;
@@ -48,7 +56,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        Documents.ItemsSource = ViewModel.Rows;
+        Documents.ItemsSource = visibleRows;
         UpdateScannerCutoff();
         ApplyTheme();
         PreviewScroll.ViewChanged += (_, _) =>
@@ -59,6 +67,10 @@ public sealed partial class MainWindow : Window
         };
         Root.AddHandler(UIElement.DragOverEvent, new DragEventHandler(DocumentsDragOver), true);
         Root.AddHandler(UIElement.DropEvent, new DragEventHandler(DocumentsDropped), true);
+        Root.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(QueuePointerPressed), true);
+        Root.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(QueuePointerMoved), true);
+        Root.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(QueuePointerReleased), true);
+        Root.AddHandler(UIElement.PointerCaptureLostEvent, new PointerEventHandler(QueueCaptureLost), true);
         var version = typeof(MainWindow).Assembly.GetName().Version;
         Title = version is null ? "Drawing Renamer" : $"Drawing Renamer v{version.ToString(3)}";
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "DrawingRenamer.ico"));
@@ -132,6 +144,23 @@ public sealed partial class MainWindow : Window
         EmptyQueue.Visibility = ViewModel.Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
+    private QueueColumns FileQueueColumns => (QueueColumns)Root.Resources["FileQueueColumns"];
+
+    private void QueueSizeChanged(object sender, SizeChangedEventArgs e) => FileQueueColumns.Fit(e.NewSize.Width - 2);
+
+    private void ResizeQueueColumn(object sender, DragDeltaEventArgs e)
+    {
+        if (sender is Thumb { Tag: string column }) FileQueueColumns.Resize(column, e.HorizontalChange);
+    }
+
+    private void ResizeQueueColumnKey(object sender, KeyRoutedEventArgs e)
+    {
+        var change = e.Key switch { Windows.System.VirtualKey.Left => -12, Windows.System.VirtualKey.Right => 12, _ => 0 };
+        if (change == 0 || sender is not Thumb { Tag: string column }) return;
+        FileQueueColumns.Resize(column, change);
+        e.Handled = true;
+    }
+
     private FileOpenPicker FilePicker(string extension)
     {
         var picker = new FileOpenPicker();
@@ -179,6 +208,85 @@ public sealed partial class MainWindow : Window
         e.AcceptedOperation = CanChangeDocuments ? DataPackageOperation.Copy : DataPackageOperation.None;
         if (CanChangeDocuments) e.DragUIOverride.Caption = "Добавить PDF и папки";
         e.Handled = true;
+    }
+
+    private DocumentRow? QueueRowAt(PointerRoutedEventArgs e) =>
+        VisualTreeHelper.FindElementsInHostCoordinates(e.GetCurrentPoint(null).Position, Documents)
+            .OfType<ListViewItem>().Select(item => Documents.ItemFromContainer(item) as DocumentRow)
+            .FirstOrDefault(row => row is not null);
+
+    private void QueuePointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (!CanChangeDocuments || ViewModel.MergeProposals.Count == 0 ||
+            e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse) return;
+        var point = e.GetCurrentPoint(Root);
+        if (!point.Properties.IsLeftButtonPressed || QueueRowAt(e) is not { IsFile: true, InMergeProposal: false } row) return;
+        for (var element = e.OriginalSource as DependencyObject; element is not null && element is not ListViewItem;
+            element = VisualTreeHelper.GetParent(element))
+            if (element is ButtonBase) return;
+        queueDragSource = row;
+        queueDragStart = point.Position;
+        queuePointerId = e.Pointer.PointerId;
+    }
+
+    private void QueuePointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (queueDragSource is not { } row || e.Pointer.PointerId != queuePointerId) return;
+        var point = e.GetCurrentPoint(Root);
+        if (!CanChangeDocuments || !point.Properties.IsLeftButtonPressed)
+        {
+            ClearQueueDrag();
+            return;
+        }
+        if (draggedQueueRows.Length == 0)
+        {
+            if (Math.Abs(point.Position.X - queueDragStart.X) < 6 && Math.Abs(point.Position.Y - queueDragStart.Y) < 6) return;
+            draggedQueueRows = Documents.SelectedItems.Contains(row)
+                ? Documents.SelectedItems.OfType<DocumentRow>().Where(item => item.IsFile && !item.InMergeProposal).ToArray()
+                : [row];
+            Root.CapturePointer(e.Pointer);
+        }
+        HighlightQueueDrop(QueueRowAt(e) is { IsMergeHeader: true } header ? header : null);
+        e.Handled = true;
+    }
+
+    private async void QueuePointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (queueDragSource is null || e.Pointer.PointerId != queuePointerId) return;
+        var pages = draggedQueueRows;
+        var target = pages.Length > 0 ? QueueRowAt(e) : null;
+        ClearQueueDrag();
+        if (pages.Length == 0) return;
+        Root.ReleasePointerCapture(e.Pointer);
+        e.Handled = true;
+        if (!CanChangeDocuments || target is not { MergeProposal: { } proposal }) return;
+        await ViewModel.AttachMergePagesAsync(proposal, pages);
+        if (!closing) RefreshDocumentRows(target);
+    }
+
+    private void QueueCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (ReferenceEquals(e.OriginalSource, Root)) ClearQueueDrag();
+    }
+
+    private void ClearQueueDrag()
+    {
+        queueDragSource = null;
+        draggedQueueRows = [];
+        HighlightQueueDrop(null);
+    }
+
+    private void HighlightQueueDrop(DocumentRow? target)
+    {
+        if (ReferenceEquals(queueDropTarget, target)) return;
+        if (queueDropTarget is not null) queueDropTarget.IsQueueDropTarget = false;
+        queueDropTarget = target;
+        if (target is not null) target.IsQueueDropTarget = true;
+    }
+
+    private void DetachMergePage(object sender, RoutedEventArgs e)
+    {
+        if (CanChangeDocuments && sender is MenuFlyoutItem { Tag: DocumentRow row }) ViewModel.DetachMergePage(row);
     }
 
     private async void DocumentsDropped(object sender, DragEventArgs e)
@@ -299,29 +407,21 @@ public sealed partial class MainWindow : Window
     private MergeProposal? SelectedMergeGroup()
     {
         if (Documents.SelectedItem is not DocumentRow selected) return null;
-        var member = selected.MergeProposal?.Pages[0] ?? selected;
-        return ViewModel.MergeProposals.FirstOrDefault(proposal => proposal.Pages.Contains(member));
+        return selected.MergeProposal ?? ViewModel.MergeProposals.FirstOrDefault(proposal => proposal.Pages.Contains(selected));
     }
 
     private async void RefreshDocumentRows(DocumentRow? preferred = null)
     {
         if (refreshingDocumentRows) return;
-        var wasFlat = ReferenceEquals(Documents.ItemsSource, ViewModel.Rows);
-        if (ViewModel.MergeProposals.Count == 0 && wasFlat)
-        {
-            UpdateCommands();
-            return;
-        }
-
         var selected = preferred ?? Documents.SelectedItem as DocumentRow ?? ViewModel.Selected;
-        var additionalSelection = preferred is null
-            ? Documents.SelectedItems.OfType<DocumentRow>().Where(row => row.IsFile && row != selected).ToArray()
-            : [];
-        var selectedMember = selected?.MergeProposal?.Pages[0] ?? selected;
+        var wasFlat = mergeHeaders.Count == 0;
+        var activeKeys = ViewModel.MergeProposals.Select(proposal => proposal.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in mergeHeaders.Keys.Where(key => !activeKeys.Contains(key)).ToArray()) mergeHeaders.Remove(key);
         var members = new Dictionary<DocumentRow, MergeProposal>();
         foreach (var proposal in ViewModel.MergeProposals)
             foreach (var row in proposal.Pages) members[row] = proposal;
-        var headers = new Dictionary<MergeProposal, DocumentRow>();
+        var addedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var actualRows = ViewModel.Rows.ToHashSet();
         var visible = new List<DocumentRow>();
         foreach (var row in ViewModel.Rows)
         {
@@ -330,30 +430,39 @@ public sealed partial class MainWindow : Window
                 visible.Add(row);
                 continue;
             }
-            if (headers.ContainsKey(proposal)) continue;
-            var folder = Path.GetDirectoryName(proposal.Pages[0].Source)!;
-            var expanded = !collapsedMergeGroups.Contains(Path.Combine(folder, proposal.Designation));
-            var header = new DocumentRow(proposal.Label)
+            if (!addedHeaders.Add(proposal.Key)) continue;
+            if (!mergeHeaders.TryGetValue(proposal.Key, out var header))
             {
-                MergeProposal = proposal, MergeExpanded = expanded, InMergeProposal = true,
-                Status = proposal.CanMerge ? "К объединению" : "Проверить порядок"
-            };
+                header = new DocumentRow(proposal.Label) { MergeProposal = proposal, MergeExpanded = true };
+                mergeHeaders.Add(proposal.Key, header);
+            }
+            header.UpdateMergeHeader(proposal);
             visible.Add(header);
-            headers.Add(proposal, header);
-            if (expanded) visible.AddRange(proposal.Ordered.Where(ViewModel.Rows.Contains));
+            if (header.MergeExpanded) visible.AddRange(proposal.Ordered.Where(actualRows.Contains));
         }
 
-        var next = visible.Contains(selected!) ? selected : null;
-        if ((next is null || (wasFlat && additionalSelection.Length == 0)) && selectedMember is not null &&
-            members.TryGetValue(selectedMember, out var selectedGroup))
-            headers.TryGetValue(selectedGroup, out next);
+        var visibleSet = visible.ToHashSet();
+        var next = selected is not null && visibleSet.Contains(selected) ? selected : null;
+        if ((next is null || (wasFlat && Documents.SelectedItems.Count < 2)) && selected is not null &&
+            members.TryGetValue(selected, out var selectedGroup))
+            mergeHeaders.TryGetValue(selectedGroup.Key, out next);
         refreshingDocumentRows = true;
         try
         {
-            Documents.ItemsSource = headers.Count == 0 ? ViewModel.Rows : visible;
-            Documents.SelectedItem = next ?? visible.FirstOrDefault();
-            foreach (var row in additionalSelection.Where(visible.Contains))
-                if (!Documents.SelectedItems.Contains(row)) Documents.SelectedItems.Add(row);
+            // Update the same ItemsSource so WinUI keeps the scroll anchor and animates only changed rows.
+            if (next is not null && visibleRows.Contains(next) && !ReferenceEquals(Documents.SelectedItem, next))
+                Documents.SelectedItem = next;
+            for (var i = visibleRows.Count - 1; i >= 0; i--)
+                if (!visibleSet.Contains(visibleRows[i])) visibleRows.RemoveAt(i);
+            for (var i = 0; i < visible.Count; i++)
+            {
+                if (i < visibleRows.Count && ReferenceEquals(visibleRows[i], visible[i])) continue;
+                var oldIndex = visibleRows.IndexOf(visible[i]);
+                if (oldIndex >= 0) visibleRows.Move(oldIndex, i);
+                else visibleRows.Insert(i, visible[i]);
+            }
+            next ??= visible.FirstOrDefault();
+            if (!ReferenceEquals(Documents.SelectedItem, next)) Documents.SelectedItem = next;
         }
         finally { refreshingDocumentRows = false; }
         await UpdateDocumentSelectionAsync();
@@ -361,9 +470,8 @@ public sealed partial class MainWindow : Window
 
     private void ToggleMergeGroup(object sender, RoutedEventArgs e)
     {
-        if (!CanChangeDocuments || sender is not Button { Tag: DocumentRow { MergeProposal: { } proposal } header }) return;
-        var key = Path.Combine(Path.GetDirectoryName(proposal.Pages[0].Source)!, proposal.Designation);
-        if (!collapsedMergeGroups.Add(key)) collapsedMergeGroups.Remove(key);
+        if (!CanChangeDocuments || sender is not Button { Tag: DocumentRow { IsMergeHeader: true } header }) return;
+        header.MergeExpanded = !header.MergeExpanded;
         RefreshDocumentRows(header);
     }
 

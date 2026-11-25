@@ -114,6 +114,7 @@ public sealed partial class MainViewModel : ObservableObject
         SettingsMessage = "";
         if (!value)
         {
+            manualMergeAssignments.Clear();
             foreach (var row in Rows) row.MergeEligible = false;
             RefreshMergeProposals();
         }
@@ -136,6 +137,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly HashSet<string> individualFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> excludedFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ScannerInbox.FileVersion> handledBatches = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<DocumentRow, string> manualMergeAssignments = [];
     private ScannerInbox? scannerInbox;
     private bool checkingScanner;
     private CancellationTokenSource? cancellation;
@@ -435,26 +437,93 @@ public sealed partial class MainViewModel : ObservableObject
 
     internal void RefreshMergeProposals()
     {
-        var proposals = Rows.Where(row => row.MergeEligible && row.SourceHash is not null && !string.IsNullOrWhiteSpace(row.Designation))
-            .GroupBy(row => Path.GetDirectoryName(row.Source), StringComparer.OrdinalIgnoreCase)
-            .SelectMany(folder => folder.GroupBy(row => row.Designation.Trim(), StringComparer.OrdinalIgnoreCase))
-            .Where(group => group.Count() > 1)
-            .Select(group => new MergeProposal(group.ToArray())).ToArray();
+        var eligible = Rows.Where(row => row.MergeEligible && row.SourceHash is not null).ToArray();
+        var natural = eligible.Where(row => !manualMergeAssignments.ContainsKey(row) && !string.IsNullOrWhiteSpace(row.Designation))
+            .ToLookup(NaturalMergeKey, StringComparer.OrdinalIgnoreCase);
+        foreach (var (row, key) in manualMergeAssignments.ToArray())
+            if (!Rows.Contains(row) || !natural.Contains(key)) manualMergeAssignments.Remove(row);
+        var attached = eligible.Where(manualMergeAssignments.ContainsKey)
+            .ToLookup(row => manualMergeAssignments[row], StringComparer.OrdinalIgnoreCase);
+        var proposals = natural.Select(group =>
+            {
+                var first = group.First();
+                return new MergeProposal(Path.GetDirectoryName(first.Source)!, first.Designation.Trim(),
+                    [..group, ..attached[group.Key]]);
+            }).Where(group => group.Pages.Length > 1).ToArray();
         var grouped = proposals.SelectMany(proposal => proposal.Pages).ToHashSet();
-        foreach (var row in Rows) row.InMergeProposal = grouped.Contains(row);
+        foreach (var row in Rows)
+        {
+            row.InMergeProposal = grouped.Contains(row);
+            row.ManuallyAssigned = manualMergeAssignments.ContainsKey(row);
+        }
         if (proposals.Length > 0 || MergeProposals.Count > 0) MergeProposals = proposals;
     }
 
+    private static string NaturalMergeKey(DocumentRow row) =>
+        MergeProposal.MakeKey(Path.GetDirectoryName(row.Source)!, row.Designation);
+
+    internal void DetachMergePage(DocumentRow row)
+    {
+        if (Busy || !manualMergeAssignments.Remove(row)) return;
+        RefreshMergeProposals();
+        Message = "Лист исключён из ручного состава группы.";
+    }
+
+    internal Task AttachMergePagesAsync(MergeProposal proposal, IEnumerable<DocumentRow> selection) => WorkAsync(async () =>
+    {
+        var current = MergeProposals.FirstOrDefault(group => SameMergeKey(group.Key, proposal.Key));
+        var pages = selection.Distinct().ToArray();
+        if (current is null || pages.Length == 0 || pages.Any(row => !Rows.Contains(row) || row.InMergeProposal)) return;
+
+        foreach (var row in pages)
+        {
+            string? hash;
+            try
+            {
+                hash = await Task.Run(() =>
+                {
+                    using var input = File.OpenRead(row.Source);
+                    return new PdfRenderer().CountPages(input, default) == 1 ? RenameService.Hash(input) : null;
+                });
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+            {
+                Message = $"Не удалось добавить {row.OriginalName}. {ex.Message}";
+                return;
+            }
+            if (hash is null)
+            {
+                Message = $"{row.OriginalName} содержит несколько страниц. В группу можно добавить отдельные листы.";
+                return;
+            }
+            if (!row.ObserveVersion(hash))
+            {
+                Message = $"{row.OriginalName} изменился. Распознайте его повторно.";
+                return;
+            }
+        }
+
+        foreach (var row in pages)
+        {
+            row.MergeEligible = true;
+            manualMergeAssignments[row] = current.Key;
+        }
+        RefreshMergeProposals();
+        Message = $"Добавлено листов: {pages.Length}. Проверьте порядок объединения.";
+    });
+
+    private static bool SameMergeKey(string first, string second) => string.Equals(first, second, StringComparison.OrdinalIgnoreCase);
+
     internal Task MergeAsync(MergeProposal proposal) => WorkAsync(async () =>
     {
-        var current = MergeProposals.FirstOrDefault(group => group.Pages.Contains(proposal.Pages[0]));
+        var current = MergeProposals.FirstOrDefault(group => SameMergeKey(group.Key, proposal.Key));
         if (current is null || !current.CanMerge || current.FileName is not { } fileName || SeparatorError is not null)
         {
             Message = "Укажите корректное имя и номера листов без пропусков или повторов.";
             return;
         }
-        if (current.Pages.Any(row => !Rows.Contains(row) || !row.MergeEligible ||
-            !string.Equals(row.Designation.Trim(), current.Designation, StringComparison.OrdinalIgnoreCase)))
+        if (current.Pages.Any(row => !Rows.Contains(row) || !row.MergeEligible || row.SourceHash is null ||
+            !SameMergeKey(manualMergeAssignments.TryGetValue(row, out var key) ? key : NaturalMergeKey(row), current.Key)))
         {
             RefreshMergeProposals();
             Message = "Состав группы изменился. Проверьте листы и выберите предложение заново.";
@@ -462,7 +531,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         var ordered = current.Ordered;
-        var output = Path.Combine(Path.GetDirectoryName(ordered[0].Source)!, fileName);
+        var output = Path.Combine(current.Folder, fileName);
         var inputs = ordered.Select(row => (row.Source, row.SourceHash!, row.PageRotations.GetValueOrDefault(1))).ToArray();
         try { await Task.Run(() => PdfRenderer.MergePages(output, inputs)); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
@@ -495,7 +564,7 @@ public sealed partial class MainViewModel : ObservableObject
         var merged = new DocumentRow(output)
         {
             Designation = current.Designation,
-            DocumentName = ordered.First(row => row.NewName == fileName).DocumentName,
+            DocumentName = current.NamedSheet!.DocumentName,
             Included = false,
             Status = "Объединён",
             Diagnostic = "Итоговый PDF сохранён."
@@ -512,7 +581,7 @@ public sealed partial class MainViewModel : ObservableObject
     private Task AnalyzeAsync() => AnalyzeRowsAsync(Rows.Where(r => r.Included).ToArray(), false, proposeMerges: SplitScanBatches);
 
     public Task AnalyzeDocumentAsync(DocumentRow row) => Rows.Contains(row)
-        ? AnalyzeRowsAsync([row], true) : Task.CompletedTask;
+        ? AnalyzeRowsAsync([row], true, proposeMerges: SplitScanBatches && row.InMergeProposal) : Task.CompletedTask;
 
     private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force, bool requireReview = false, bool proposeMerges = false)
     {

@@ -281,6 +281,103 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public async Task AttachAndDetachKeepOriginalRecognitionAndMergeInTheTargetFolder()
+    {
+        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { OcrEnabled = false, SplitScanBatches = true };
+        var first = Pdf(NumberedSheet("ABCD.123456.001", 1));
+        var second = Pdf(NumberedSheet("ABCD.123456.001", 2));
+        var otherFolder = Directory.CreateDirectory(Path.Combine(folder, "different-folder"));
+        var third = Path.Combine(otherFolder.FullName, "лист.pdf");
+        File.Copy(Pdf(NumberedSheet("ABCD.123456.999", 3)), third);
+        await model.AddDocumentsAsync([first, second, third]);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        var page = Assert.Single(model.Rows, row => row.Source == third);
+        Assert.False(page.InMergeProposal);
+        var original = Assert.Single(model.MergeProposals);
+        await model.AttachMergePagesAsync(original, [page]);
+        Assert.True(page.ManuallyAssigned);
+        Assert.Equal("ABCD.123456.999", page.Designation);
+        Assert.Equal(new[] { first, second, third }, Assert.Single(model.MergeProposals).Ordered.Select(row => row.Source));
+
+        model.DetachMergePage(page);
+        Assert.False(page.InMergeProposal);
+        Assert.False(page.ManuallyAssigned);
+        await model.AttachMergePagesAsync(Assert.Single(model.MergeProposals), [page]);
+        await model.MergeAsync(Assert.Single(model.MergeProposals));
+
+        var output = Path.Combine(folder, "ABCD.123456.001_MAIN HOUSING.pdf");
+        using var result = UglyToad.PdfPig.PdfDocument.Open(output);
+        Assert.Equal(3, result.NumberOfPages);
+        Assert.True(File.Exists(third));
+        Assert.Empty(model.MergeProposals);
+    }
+
+    [Fact]
+    public async Task AGroupDropRejectsAllItemsIfOneIsNotASinglePage()
+    {
+        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { OcrEnabled = false, SplitScanBatches = true };
+        Page First(int number) => NumberedSheet("ABCD.123456.001", number);
+        await model.AddDocumentsAsync([Pdf(First(1)), Pdf(First(2))]);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        var proposal = Assert.Single(model.MergeProposals);
+        var single = new DocumentRow(Pdf(First(3)));
+        var multiple = new DocumentRow(Pdf(First(3), First(4)));
+        model.Rows.Add(single);
+        model.Rows.Add(multiple);
+
+        await model.AttachMergePagesAsync(proposal, [single, multiple]);
+
+        Assert.Same(proposal, Assert.Single(model.MergeProposals));
+        Assert.False(single.ManuallyAssigned);
+        Assert.False(multiple.ManuallyAssigned);
+        Assert.Contains("несколько страниц", model.Message);
+    }
+
+    [Fact]
+    public void RasterNameCropKeepsAThinConnectedDescender()
+    {
+        const int width = 1650, height = 2340;
+        var pixels = new byte[width * height * 4];
+        Array.Fill(pixels, byte.MaxValue);
+        Ink(158, 1868, 1612, 1872);
+        Ink(158, 2297, 1612, 2301);
+        Ink(158, 1868, 162, 2301);
+        Ink(1608, 1868, 1612, 2301);
+        Ink(668, 1868, 672, 2301);
+        Ink(668, 1986, 1612, 1990);
+        Ink(1218, 1986, 1222, 2301);
+        Ink(1218, 2143, 1612, 2147);
+        Ink(668, 2182, 1222, 2186);
+        Ink(780, 1900, 1100, 1940);
+        Ink(738, 2010, 774, 2050);
+        Ink(805, 2010, 835, 2050);
+        Ink(805, 2049, 811, 2060);
+        Ink(960, 2061, 966, 2072);
+
+        var scan = new Raster(width, height, pixels);
+        var stamp = Assert.Single(ScanTitleLocator.Find(scan, 595, 842, [TitleTemplate.Defaults[0]], _ => scan, default),
+            stamp => stamp.Turn == 0);
+        Assert.NotNull(stamp.NameWithDescenders);
+        Assert.True(stamp.Regions.Name.Bottom * height < 2060);
+        Assert.InRange(stamp.NameWithDescenders.Value.Bottom * height, 2060, 2071);
+
+        void Ink(int left, int top, int right, int bottom)
+        {
+            for (var y = top; y < bottom; y++)
+                for (var x = left; x < right; x++) pixels.AsSpan(4 * (y * width + x), 3).Clear();
+        }
+    }
+
+    [Theory]
+    [InlineData("Певеход", "Переход", true)]
+    [InlineData("Ось поиводная", "Ось приводная", true)]
+    [InlineData("Переход", "с Переход", false)]
+    [InlineData("Переход Сборочный чертеж", "Переход Сборочный черте", false)]
+    [InlineData("Опора", "Опова", false)]
+    public void ExtraPixelsCanRestoreRWithoutAcceptingOtherChanges(string initial, string extended, bool expected) =>
+        Assert.Equal(expected, DrawingAnalyzer.RestoresCyrillicR(initial, extended));
+
+    [Fact]
     public async Task ScannerUsesCreationTimeAndUpdatesCutoffWhenReenabled()
     {
         var input = Pdf(Sheet(595, 842, 0));

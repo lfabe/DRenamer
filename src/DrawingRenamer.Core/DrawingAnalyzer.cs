@@ -406,6 +406,15 @@ public sealed class DrawingAnalyzer
                 if (lines.All(l => !string.IsNullOrWhiteSpace(l.Text)) && joinedReading.Score > result.Score)
                     result = joinedReading;
             }
+            if (scan?.NameWithDescenders is { } extended && extended != candidate.Regions.Name)
+            {
+                var restored = Read(extended, preferEnglish: englishFirst);
+                if (restored.Confidence >= .75 && RestoresCyrillicR(NormalizeName(result.Text), NormalizeName(restored.Text)))
+                {
+                    result = restored;
+                    candidate = candidate with { Regions = candidate.Regions with { Name = extended } };
+                }
+            }
             name = NormalizeOcrName(result.Text);
             nameScore = result.Score;
             confidence = Math.Min(confidence, result.Confidence);
@@ -447,6 +456,14 @@ public sealed class DrawingAnalyzer
             }
             return direct;
         }
+    }
+
+    internal static bool RestoresCyrillicR(string original, string restored)
+    {
+        if (original.Length != restored.Length || original == restored) return false;
+        for (var i = 0; i < original.Length; i++)
+            if (original[i] != restored[i] && !(restored[i] == 'р' && original[i] is 'в' or 'о')) return false;
+        return true;
     }
 
     public static string NormalizeName(string value) => Regex.Replace(value.Normalize(NormalizationForm.FormC),

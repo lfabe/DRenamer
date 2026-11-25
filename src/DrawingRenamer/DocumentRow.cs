@@ -26,6 +26,8 @@ public sealed partial class DocumentRow : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(FileLabel), nameof(QueueNewName), nameof(QueueStatus))]
     public partial bool InMergeProposal { get; set; }
+    [ObservableProperty] public partial bool ManuallyAssigned { get; set; }
+    [ObservableProperty] public partial bool IsQueueDropTarget { get; set; }
 
     public bool IsMergeHeader => MergeProposal is not null;
     public bool IsFile => !IsMergeHeader;
@@ -33,8 +35,17 @@ public sealed partial class DocumentRow : ObservableObject
     public string QueueNewName => InMergeProposal ? "" : NewName;
     public string FileLabel => InMergeProposal ? $"   ↳  {OriginalName}" : OriginalName;
     public string GroupLabel => $"{(MergeExpanded ? "▾" : "▸")}  {MergeProposal?.Label}";
-    internal bool MergeExpanded { get; init; }
-    internal MergeProposal? MergeProposal { get; init; }
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(GroupLabel))]
+    internal partial bool MergeExpanded { get; set; }
+    internal MergeProposal? MergeProposal { get; set; }
+    internal void UpdateMergeHeader(MergeProposal proposal)
+    {
+        MergeProposal = proposal;
+        Source = proposal.Label;
+        Status = proposal.CanMerge ? "К объединению" : "Проверить порядок";
+        OnPropertyChanged(nameof(GroupLabel));
+    }
     internal bool MergeEligible { get; set; }
     internal int? SheetNumber => int.TryParse(SheetNumberText.Trim(), out var number) && number > 0 ? number : null;
 
@@ -190,13 +201,19 @@ public sealed partial class DocumentRow : ObservableObject
     }
 }
 
-internal sealed class MergeProposal(DocumentRow[] pages)
+internal sealed class MergeProposal(string folder, string designation, DocumentRow[] pages)
 {
+    public string Folder { get; } = folder;
+    public string Designation { get; } = designation;
+    public string Key => MakeKey(Folder, Designation);
     public DocumentRow[] Pages { get; } = pages;
     public DocumentRow[] Ordered => Pages.OrderBy(page => page.SheetNumber ?? int.MaxValue).ToArray();
-    public string Designation => Pages[0].Designation.Trim();
-    public string? FileName => Ordered.Select(page => page.NewName).FirstOrDefault(name => name.Length > 0);
+    public DocumentRow? NamedSheet => Ordered.FirstOrDefault(page => page.NewName.Length > 0 &&
+        string.Equals(page.Designation.Trim(), Designation, StringComparison.OrdinalIgnoreCase));
+    public string? FileName => NamedSheet?.NewName;
     public string Label => FileName ?? $"{Designation}.pdf";
     public bool CanMerge => FileName is not null && Ordered.Select(page => page.SheetNumber)
         .SequenceEqual(Enumerable.Range(1, Pages.Length).Select(number => (int?)number));
+
+    internal static string MakeKey(string folder, string designation) => $"{folder}\0{designation.Trim()}";
 }
