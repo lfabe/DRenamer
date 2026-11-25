@@ -208,13 +208,13 @@ public sealed partial class MainViewModel : ObservableObject
     public Task AddDocumentsAsync(IEnumerable<string> files, params string[] directories)
     {
         if (Busy) return Task.CompletedTask;
-        var pdfs = files.Where(IsPdf).Select(path => Path.GetFullPath(path)).ToArray();
+        var pdfs = files.Where(IsPdf).Select(path => Path.GetFullPath(path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var sources = directories.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path))).ToArray();
         excludedFiles.ExceptWith(pdfs);
         if (SplitScanBatches && sources.Length == 0)
             return WorkAsync(async () =>
             {
-                var (prepared, warning) = await PrepareBatchFilesAsync(pdfs);
+                var (prepared, warning) = await PrepareBatchFilesAsync(pdfs, explicitlyAdded: pdfs);
                 individualFiles.UnionWith(prepared);
                 var count = AddRows(prepared);
                 Message = $"Добавлено: {count}. В очереди: {Rows.Count}. {warning}".TrimEnd();
@@ -223,11 +223,11 @@ public sealed partial class MainViewModel : ObservableObject
         if (sources.Length > 0)
         {
             folders.UnionWith(sources);
-            return RefreshDocumentsAsync();
+            return RefreshDocumentsAsync(pdfs);
         }
 
         var count = AddRows(pdfs);
-        Message = pdfs.Length == 0 ? "Добавьте PDF-файлы или папки."
+        Message = pdfs.Count == 0 ? "Добавьте PDF-файлы или папки."
             : $"Добавлено: {count}. В очереди: {Rows.Count}.";
         return Task.CompletedTask;
     }
@@ -357,7 +357,9 @@ public sealed partial class MainViewModel : ObservableObject
         return count;
     }
 
-    public async Task RefreshDocumentsAsync()
+    public Task RefreshDocumentsAsync() => RefreshDocumentsAsync(null);
+
+    private async Task RefreshDocumentsAsync(IReadOnlySet<string>? explicitlyAdded)
     {
         if (Busy) return;
         var recursiveSearch = Recursive;
@@ -391,7 +393,7 @@ public sealed partial class MainViewModel : ObservableObject
             {
                 var existing = Rows.Select(row => row.Source).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var originals = paths.Where(path => !existing.Contains(path)).ToArray();
-                var prepared = await PrepareBatchFilesAsync(originals);
+                var prepared = await PrepareBatchFilesAsync(originals, explicitlyAdded: explicitlyAdded);
                 paths.ExceptWith(originals);
                 individualFiles.ExceptWith(originals);
                 paths.UnionWith(prepared.Paths);
@@ -411,7 +413,8 @@ public sealed partial class MainViewModel : ObservableObject
         });
     }
 
-    private async Task<(string[] Paths, string? Warning)> PrepareBatchFilesAsync(IEnumerable<string> paths, bool manual = false)
+    private async Task<(string[] Paths, string? Warning)> PrepareBatchFilesAsync(IEnumerable<string> paths,
+        bool manual = false, IReadOnlySet<string>? explicitlyAdded = null)
     {
         var files = paths.ToArray();
         var result = await Task.Run(() =>
@@ -420,17 +423,23 @@ public sealed partial class MainViewModel : ObservableObject
             string? warning = null;
             foreach (var path in files)
             {
+                var keepOriginal = explicitlyAdded?.Contains(path) == true;
                 try
                 {
                     using var input = File.OpenRead(path);
                     var version = new ScannerInbox.FileVersion(new FileInfo(path));
                     if (!manual)
                     {
-                        if (handledBatches.TryGetValue(path, out var previous) && previous == version) continue;
-                        var receipt = BatchReceipt(path);
-                        if (File.Exists(receipt) && File.ReadAllText(receipt) == RenameService.Hash(input))
+                        var alreadySplit = handledBatches.TryGetValue(path, out var previous) && previous == version;
+                        if (!alreadySplit)
+                        {
+                            var receipt = BatchReceipt(path);
+                            alreadySplit = File.Exists(receipt) && File.ReadAllText(receipt) == RenameService.Hash(input);
+                        }
+                        if (alreadySplit)
                         {
                             handledBatches[path] = version;
+                            if (keepOriginal) ready.Add(path);
                             continue;
                         }
                     }
@@ -447,6 +456,7 @@ public sealed partial class MainViewModel : ObservableObject
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
                 {
+                    if (keepOriginal) ready.Add(path);
                     warning = $"Не удалось разделить {Path.GetFileName(path)}. {ex.Message}";
                 }
             }

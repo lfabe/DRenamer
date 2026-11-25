@@ -301,6 +301,30 @@ public sealed class RecognitionTests : IDisposable
         Assert.Contains("одна страница", model.Message);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ExplicitlyAddingAnAlreadySplitPdfOpensTheOriginal(bool hasReceipt, bool withFolder)
+    {
+        var source = Pdf(NumberedSheet("ABCD.123456.001", 1), NumberedSheet("ABCD.123456.001", 2));
+        var settings = Path.Combine(folder, "settings.json");
+        if (hasReceipt)
+            await new MainViewModel(settings) { SplitScanBatches = true }.AddDocumentsAsync([source]);
+        else
+            PdfRenderer.SplitPages(source);
+        var hashes = Directory.GetFiles(folder, "*.pdf").ToDictionary(path => path, RenameService.Hash);
+        var model = new MainViewModel(settings) { SplitScanBatches = true };
+
+        await model.AddDocumentsAsync([source], withFolder ? [folder] : []);
+        await model.RefreshDocumentsAsync();
+
+        Assert.Single(model.Rows, row => row.Source == source);
+        using var input = File.OpenRead(source);
+        Assert.Equal(2, new PdfRenderer().CountPages(input, default));
+        Assert.All(hashes, file => Assert.Equal(file.Value, RenameService.Hash(file.Key)));
+    }
+
     [Fact]
     public async Task RemovingGroupHeaderRemovesEverySheetOnlyFromTheQueue()
     {
