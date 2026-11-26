@@ -114,6 +114,7 @@ public sealed partial class MainWindow : Window
             preview?.Cancel();
             cropSearch?.Cancel();
             ViewModel.CancelCommand.Execute(null);
+            ViewModel.Renamer.Dispose();
         };
         UpdateCommands();
     }

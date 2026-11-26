@@ -272,8 +272,9 @@ public sealed class PdfRenderer
                 finally { Native.FPDF_ClosePage(page); }
             }
 
-            const uint incremental = 1;
-            return Save(document, output, incremental);
+            // Keep only the current revision; RenameService stores undo originals separately.
+            const uint noIncremental = 2;
+            return Save(document, output, noIncremental);
         });
     }
 

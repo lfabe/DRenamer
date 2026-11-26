@@ -584,6 +584,26 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Fact]
+    public void PageEditsSaveACompactScanAndUndoRestoresExactBytes()
+    {
+        var source = Path.Combine(folder, "original.pdf");
+        File.Copy(Path.Combine(AppContext.BaseDirectory, "scan-form1.pdf"), source);
+        var original = File.ReadAllBytes(source);
+        var service = new RenameService(Path.Combine(folder, "history.json"));
+        var request = new RenameRequest(source, "A", "COVER")
+        {
+            PageAlignments = new Dictionary<int, PageAlignment> { [1] = new(2.5, .98) }
+        };
+
+        var result = Assert.Single(service.Execute([request]));
+        Assert.Equal(MoveStatus.Moved, result.Status);
+        Assert.True(new FileInfo(result.Target!).Length < original.Length * 1.1,
+            "Saving a geometric edit must not embed the original PDF revision in the result.");
+        Assert.Equal(MoveStatus.Undone, Assert.Single(service.Undo()).Status);
+        Assert.Equal(original, File.ReadAllBytes(source));
+    }
+
+    [Fact]
     public void InvalidPageRotationLeavesTheSourceInPlace()
     {
         var source = Pdf(Sheet(595, 842, 0));
