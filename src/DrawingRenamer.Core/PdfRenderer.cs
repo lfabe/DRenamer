@@ -159,6 +159,16 @@ public sealed class PdfRenderer
         return PageAlignment.ForScan(raster, -Math.Atan(slope.Value) * 180 / Math.PI, token);
     }
 
+    public PageCrop? FindPageCrop(Stream input, int number, int turns, PageAlignment alignment, Area? stamp, CancellationToken token)
+    {
+        var raster = WithDocument(input, document => RenderPage(document, number, Area.Full, 2300, token, turns), token);
+        var (width, height) = PageSize(input, number, token);
+        if ((turns & 1) != 0) (width, height) = (height, width);
+        var upright = PageCrop.Resample(raster, Area.Full, raster.Width, raster.Height, alignment, token);
+        var block = stamp is { IsValid: true } hint ? alignment.Bounds(hint.Rotate(turns), raster.Width, raster.Height) : (Area?)null;
+        return DrawingFrameCrop.Find(upright, width, height, turns, block, token);
+    }
+
     private static unsafe void AlignPage(IntPtr document, int number, PageAlignment alignment, int turns)
     {
         if (!double.IsFinite(alignment.Angle) || Math.Abs(alignment.Angle) > 4 ||
@@ -170,6 +180,11 @@ public sealed class PdfRenderer
         {
             if (Native.FPDF_GetPageBoundingBox(page, out var box) == 0)
                 throw new InvalidDataException("Не удалось определить границы страницы PDF.");
+            if (alignment.Crop is { } crop)
+            {
+                CropPage(page, box, alignment, crop);
+                return;
+            }
             var x = ((double)box.Left + box.Right) / 2;
             var y = ((double)box.Bottom + box.Top) / 2;
             // PDF coordinates point upward, opposite to the clockwise angle in the preview.
@@ -186,6 +201,45 @@ public sealed class PdfRenderer
             if (turns != 0) Native.FPDFPage_SetRotation(page, (Native.FPDFPage_GetRotation(page) + turns) % 4);
         }
         finally { Native.FPDF_ClosePage(page); }
+    }
+
+    private static unsafe void CropPage(IntPtr page, Native.PageBox box, PageAlignment alignment, PageCrop crop)
+    {
+        var bounds = crop.Bounds;
+        if (crop.WidthMm is < 100 or > 3000 || crop.HeightMm is < 100 or > 3000 || crop.Turns is < 0 or > 3 ||
+            !double.IsFinite(bounds.X) || !double.IsFinite(bounds.Y) || !double.IsFinite(bounds.Width) ||
+            !double.IsFinite(bounds.Height) || bounds.X is < -.4 or > .5 || bounds.Y is < -.4 or > .5 ||
+            bounds.Width is < .35 or > 1.4 || bounds.Height is < .35 or > 1.4)
+            throw new InvalidDataException("Недопустимые границы обрезки.");
+        var width = (double)box.Right - box.Left;
+        var height = (double)box.Top - box.Bottom;
+        var centerX = box.Left + width / 2;
+        var centerY = box.Bottom + height / 2;
+        var quarter = (Native.FPDFPage_GetRotation(page) + crop.Turns) & 3;
+        var (viewW, viewH) = (quarter & 1) == 0 ? (width, height) : (height, width);
+        var outputW = (float)(crop.WidthMm * PageCrop.PointsPerMm);
+        var outputH = (float)(crop.HeightMm * PageCrop.PointsPerMm);
+        var (sin, cos) = Math.SinCos((quarter * 90 + alignment.Angle) * Math.PI / 180);
+        var scaleX = outputW / (bounds.Width * viewW);
+        var scaleY = outputH / (bounds.Height * viewH);
+        var a = cos * alignment.Scale * scaleX;
+        var b = -sin * alignment.Scale * scaleY;
+        var c = sin * alignment.Scale * scaleX;
+        var d = cos * alignment.Scale * scaleY;
+        var matrix = new Native.Matrix((float)a, (float)b, (float)c, (float)d,
+            (float)((.5 - bounds.X) * viewW * scaleX - a * centerX - c * centerY),
+            (float)(outputH - (.5 - bounds.Y) * viewH * scaleY - b * centerX - d * centerY));
+        var outputBox = new Native.PageBox(0, outputH, outputW, 0);
+        if (Native.FPDFPage_TransFormWithClip(page, null, in box) == 0 ||
+            Native.FPDFPage_TransFormWithClip(page, &matrix, in outputBox) == 0)
+            throw new InvalidDataException("Не удалось обрезать содержимое страницы PDF.");
+        Native.FPDFPage_TransformAnnots(page, matrix.A, matrix.B, matrix.C, matrix.D, matrix.E, matrix.F);
+        Native.FPDFPage_SetRotation(page, 0);
+        Native.FPDFPage_SetMediaBox(page, 0, 0, outputW, outputH);
+        Native.FPDFPage_SetCropBox(page, 0, 0, outputW, outputH);
+        Native.FPDFPage_SetTrimBox(page, 0, 0, outputW, outputH);
+        Native.FPDFPage_SetBleedBox(page, 0, 0, outputW, outputH);
+        Native.FPDFPage_SetArtBox(page, 0, 0, outputW, outputH);
     }
 
     internal static void SavePageEdits(Stream input, Stream output, IReadOnlyDictionary<int, int>? rotations,
@@ -288,7 +342,7 @@ public sealed class PdfRenderer
                                 throw new InvalidDataException("Для объединения выберите одностраничные PDF.");
                             if (alignment is not null && (Native.FPDF_GetDocPermissions(source) & (1u << 3)) == 0)
                                 throw new InvalidDataException("Параметры защиты PDF запрещают менять листы.");
-                            ImportPage(target, source, 0, index, turn);
+                            ImportPage(target, source, 0, index, alignment?.Crop is null ? turn : 0);
                             if (alignment is { } adjusted) AlignPage(target, index + 1, adjusted, 0);
                             return true;
                         });
@@ -467,6 +521,11 @@ public sealed class PdfRenderer
         [DllImport(Dll)] public static extern void FPDF_ClosePage(IntPtr page);
         [DllImport(Dll)] public static extern int FPDFPage_GetRotation(IntPtr page);
         [DllImport(Dll)] public static extern void FPDFPage_SetRotation(IntPtr page, int turns);
+        [DllImport(Dll)] public static extern void FPDFPage_SetMediaBox(IntPtr page, float left, float bottom, float right, float top);
+        [DllImport(Dll)] public static extern void FPDFPage_SetCropBox(IntPtr page, float left, float bottom, float right, float top);
+        [DllImport(Dll)] public static extern void FPDFPage_SetTrimBox(IntPtr page, float left, float bottom, float right, float top);
+        [DllImport(Dll)] public static extern void FPDFPage_SetBleedBox(IntPtr page, float left, float bottom, float right, float top);
+        [DllImport(Dll)] public static extern void FPDFPage_SetArtBox(IntPtr page, float left, float bottom, float right, float top);
         [DllImport(Dll)] public static extern int FPDF_GetPageBoundingBox(IntPtr page, out PageBox box);
         [DllImport(Dll)] public static extern unsafe int FPDFPage_TransFormWithClip(IntPtr page, Matrix* matrix, in PageBox box);
         [DllImport(Dll)] public static extern void FPDFPage_TransformAnnots(IntPtr page, double a, double b, double c,

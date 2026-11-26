@@ -24,10 +24,12 @@ public sealed partial class MainWindow : Window
     public MainViewModel ViewModel { get; } = new();
     private readonly PdfRenderer renderer = new();
     private CancellationTokenSource? preview;
+    private CancellationTokenSource? cropSearch;
     private DocumentRow? current;
     private int page = 1;
     private int pageCount;
     private (int Width, int Height) sheetSize;
+    private (int Width, int Height) sourceSheetSize;
     private Area? designation;
     private Area? name;
     private Area? stamp;
@@ -110,6 +112,7 @@ public sealed partial class MainWindow : Window
             scannerTimer.Stop();
             analysisTimer.Stop();
             preview?.Cancel();
+            cropSearch?.Cancel();
             ViewModel.CancelCommand.Execute(null);
         };
         UpdateCommands();
@@ -610,8 +613,11 @@ public sealed partial class MainWindow : Window
 
     private async void MergeSelected(object sender, RoutedEventArgs e)
     {
-        if (CanChangeDocuments && sender is Button { Tag: DocumentRow { MergeProposal: { } proposal } })
-            await ViewModel.MergeAsync(proposal);
+        if (!CanChangeDocuments || sender is not Button { Tag: DocumentRow { MergeProposal: { } proposal } }) return;
+        if (proposal.Pages.Any(row => row.PageAlignments.GetValueOrDefault(1).Crop?.HasOutsideInk == true) &&
+            !await ConfirmDialog("Объединение с обрезкой", "На некоторых листах за границей обрезки замечены отметки. Объединить листы с выбранной обрезкой?", "Объединить"))
+            return;
+        await ViewModel.MergeAsync(proposal);
     }
 
     private void MergeFieldsChanged(object sender, RoutedEventArgs e)
@@ -638,7 +644,7 @@ public sealed partial class MainWindow : Window
         }
         SheetNumberInput.Visibility = selected is { IsFile: true, MergeEligible: true } ? Visibility.Visible : Visibility.Collapsed;
         Editor.Visibility = selected is { IsFile: true } ? Visibility.Visible : Visibility.Collapsed;
-        RegionControls.Visibility = PageImage.Source is not null ? Editor.Visibility : Visibility.Collapsed;
+        RegionControls.Visibility = PageImage.Source is not null && Alignment.Crop is null ? Editor.Visibility : Visibility.Collapsed;
         UpdateRegionGuidance();
         if (selected is { IsMergeHeader: true }) selected = group?.Ordered.FirstOrDefault();
         if (current == selected) return;
@@ -698,6 +704,7 @@ public sealed partial class MainWindow : Window
     {
         if (closing) return;
         preview?.Cancel();
+        cropSearch?.Cancel();
         using var operation = new CancellationTokenSource();
         preview = operation;
         var row = current;
@@ -720,12 +727,15 @@ public sealed partial class MainWindow : Window
             if (row is null) return;
             var path = row.Source;
             var knownCount = row.Result?.PageCount;
+            var alignment = Alignment;
             var result = await Task.Run(() =>
             {
                 using var input = File.OpenRead(path);
                 var hash = RenameService.Hash(input);
                 var count = knownCount is > 0 ? knownCount.Value : renderer.CountPages(input, operation.Token);
-                return (count, hash, raster: renderer.Render(path, number, Area.Full, 1800, operation.Token));
+                var raw = renderer.Render(path, number, Area.Full, 1800, operation.Token);
+                var shown = alignment.Crop?.Preview(raw, alignment, operation.Token) ?? raw;
+                return (count, hash, raster: shown, originalSize: (raw.Width, raw.Height));
             });
             operation.Token.ThrowIfCancellationRequested();
             if (!row.ObserveVersion(result.hash)) return;
@@ -738,6 +748,7 @@ public sealed partial class MainWindow : Window
             await bitmap.SetBitmapAsync(buffer);
             operation.Token.ThrowIfCancellationRequested();
             sheetSize = (result.raster.Width, result.raster.Height);
+            sourceSheetSize = result.originalSize;
             UpdateSheetTransforms();
             PageImage.Source = bitmap;
             UpdateCommands();
@@ -746,7 +757,7 @@ public sealed partial class MainWindow : Window
             PreviousButton.IsEnabled = page > 1;
             NextButton.IsEnabled = page < pageCount;
             PreviewMessage.Visibility = Visibility.Collapsed;
-            RegionControls.Visibility = Editor.Visibility;
+            RegionControls.Visibility = alignment.Crop is null ? Editor.Visibility : Visibility.Collapsed;
             UpdateRegionGuidance();
             Area? frame = null;
             if (row.SelectedCandidate is { } candidate && candidate.Page == page)
@@ -786,10 +797,17 @@ public sealed partial class MainWindow : Window
 
     private void UpdateDeskewButton()
     {
-        var applied = current?.PageAlignments.ContainsKey(page) == true;
+        var alignment = Alignment;
+        var cropped = alignment.Crop is not null;
+        var applied = alignment.Angle != 0;
         var suggestions = current?.AvailableAlignments;
         var angle = suggestions?.GetValueOrDefault(page).Angle ?? 0;
-        DeskewButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && (applied || angle != 0);
+        DeskewButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && !cropped && (applied || angle != 0);
+        CropButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && cropSearch is null &&
+            (cropped || applied || angle == 0);
+        CropButton.Content = cropped ? "Отменить обрезку" : "Обрезать по основной рамке";
+        ToolTipService.SetToolTip(CropButton, angle != 0 && !applied && !cropped ? "Сначала выровняйте лист." : null);
+        if (cropped) RotateLeftButton.IsEnabled = RotateRightButton.IsEnabled = false;
         DeskewButton.IsChecked = applied;
         var label = applied ? "Отменить выравнивание листа" : "Выровнять лист";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DeskewButton, label);
@@ -801,7 +819,7 @@ public sealed partial class MainWindow : Window
     private void ToggleDeskew(object sender, RoutedEventArgs e)
     {
         if (current is not { } row || !CanChangeDocuments || PageImage.Source is null ||
-            dragStart.HasValue)
+            dragStart.HasValue || Alignment.Crop is not null)
         {
             UpdateDeskewButton();
             return;
@@ -827,6 +845,58 @@ public sealed partial class MainWindow : Window
         UpdateDeskewButton();
     }
 
+    private async void ToggleCrop(object sender, RoutedEventArgs e)
+    {
+        if (current is not { SourceHash: { } hash } row || !CropButton.IsEnabled || dragStart.HasValue) return;
+        var alignment = Alignment;
+        var number = page;
+        if (alignment.Crop is not null)
+        {
+            if (alignment.Angle == 0) row.PageAlignments.Remove(number);
+            else row.PageAlignments[number] = alignment with { Crop = null };
+            await SelectPageAsync(number);
+            ViewModel.Message = "Обрезка отменена.";
+            return;
+        }
+
+        var path = row.Source;
+        var turn = PreviewTurn;
+        var hint = CurrentStamp;
+        using var operation = new CancellationTokenSource();
+        cropSearch = operation;
+        UpdateDeskewButton();
+        try
+        {
+            var crop = await Task.Run(() =>
+            {
+                using var input = File.OpenRead(path);
+                if (RenameService.Hash(input) != hash) throw new InvalidDataException("PDF изменился. Откройте лист заново.");
+                return renderer.FindPageCrop(input, number, turn, alignment, hint, operation.Token);
+            }, operation.Token);
+            operation.Token.ThrowIfCancellationRequested();
+            if (current != row || number != page || turn != PreviewTurn || alignment != Alignment) return;
+            if (crop is null)
+            {
+                ViewModel.Message = "Не удалось уверенно найти основную рамку и подобрать формат. Проверьте ориентацию и перекос листа.";
+                return;
+            }
+            row.PageAlignments[number] = alignment with { Crop = crop };
+            await SelectPageAsync(number);
+            var warning = crop.HasOutsideInk ? " · За границей есть видимые отметки. Проверьте результат." : "";
+            ViewModel.Message = $"Обрезка {crop.Format} · {crop.WidthMm} × {crop.HeightMm} мм · Поля 20/5/5/5 мм{warning}";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
+        {
+            if (!operation.IsCancellationRequested) ViewModel.Message = $"Не удалось подготовить обрезку. {ex.Message}";
+        }
+        finally
+        {
+            cropSearch = null;
+            if (!closing) UpdateCommands();
+        }
+    }
+
     private void ScrollPreviewHorizontally(object sender, PointerRoutedEventArgs e)
     {
         if ((e.KeyModifiers & Windows.System.VirtualKeyModifiers.Shift) == 0) return;
@@ -839,7 +909,7 @@ public sealed partial class MainWindow : Window
 
     private void RotateSheet(int degrees)
     {
-        if (current is not { } row || PageImage.Source is null || dragStart.HasValue) return;
+        if (current is not { } row || PageImage.Source is null || dragStart.HasValue || Alignment.Crop is not null) return;
         var turns = (PreviewTurn + degrees / 90 + 4) & 3;
         if (turns == 0) row.PageRotations.Remove(page);
         else row.PageRotations[page] = turns;
@@ -850,10 +920,10 @@ public sealed partial class MainWindow : Window
 
     private void UpdateSheetTransforms()
     {
-        SheetRotation.Angle = PreviewTurn * 90;
         var alignment = Alignment;
-        ScanTransform.Rotation = alignment.Angle;
-        ScanTransform.ScaleX = ScanTransform.ScaleY = alignment.Scale;
+        SheetRotation.Angle = alignment.Crop is null ? PreviewTurn * 90 : 0;
+        ScanTransform.Rotation = alignment.Crop is null ? alignment.Angle : 0;
+        ScanTransform.ScaleX = ScanTransform.ScaleY = alignment.Crop is null ? alignment.Scale : 1;
     }
 
     private void FitSheet(Area? frame = null)
@@ -862,9 +932,15 @@ public sealed partial class MainWindow : Window
         PreviewScroll.ChangeView(0, 0, 1, true);
         Root.UpdateLayout();
         var (width, height) = sheetSize;
-        var turn = PreviewTurn;
+        var turn = Alignment.Crop is null ? PreviewTurn : 0;
         var (extentWidth, extentHeight) = (turn & 1) == 0 ? (width, height) : (height, width);
-        var focus = frame is { IsValid: true } block ? Alignment.Bounds(block, width, height).Rotate(turn) : Area.Full;
+        var focus = Area.Full;
+        if (frame is { IsValid: true } block)
+        {
+            var (sourceWidth, sourceHeight) = sourceSheetSize;
+            var aligned = Alignment.Bounds(block, sourceWidth, sourceHeight).Rotate(PreviewTurn);
+            focus = Alignment.Crop?.Map(aligned) ?? aligned;
+        }
         if (!focus.IsValid) focus = Area.Full;
         var scale = Math.Min(Math.Max(1, PreviewScroll.ActualWidth - 16) / (extentWidth * focus.Width),
             Math.Max(1, PreviewScroll.ActualHeight - 16) / (extentHeight * focus.Height));
@@ -1005,6 +1081,7 @@ public sealed partial class MainWindow : Window
     private void PaintRegions()
     {
         Overlays.Children.Clear();
+        if (Alignment.Crop is not null) return;
         var recognized = current?.SelectedCandidate;
         var fields = recognized?.Page == page ? recognized.Regions : null;
         if ((stamp ?? fields?.TitleBlock) is { } block) Draw(block, Colors.DodgerBlue, true);
@@ -1168,14 +1245,19 @@ public sealed partial class MainWindow : Window
             if (closing) return;
             var pending = plans.Where(plan => plan.Status == MoveStatus.Pending).ToArray();
             var approved = pending.Select(plan => plan.Source).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var aligned = requests.Where(request => approved.Contains(request.Source))
-                .Sum(request => request.PageAlignments?.Count ?? 0);
+            var edits = requests.Where(request => approved.Contains(request.Source))
+                .SelectMany(request => request.PageAlignments?.Values ?? []).ToArray();
+            var cropped = edits.Count(edit => edit.Crop is not null);
+            var aligned = edits.Count(edit => edit.Angle != 0);
             var skipped = plans.Where(plan => plan.Status == MoveStatus.Skipped).Concat(unconfirmed).ToArray();
             var summary = $"Будет обработано файлов: {pending.Length}. Будет пропущено: {skipped.Length}.";
             if (aligned > 0) summary += $" Будет сохранено выравнивание листов: {aligned}.";
+            if (cropped > 0) summary += $" Будет сохранена обрезка листов: {cropped}.";
+            if (edits.Any(edit => edit.Crop?.HasOutsideInk == true))
+                summary += " На некоторых листах за границей обрезки замечены отметки.";
             var details = skipped.Select(plan => $"{Path.GetFileName(plan.Source)}\n{plan.Message}")
                 .Concat(pending.Select(plan => string.Equals(plan.Source, plan.Target, StringComparison.OrdinalIgnoreCase)
-                    ? $"{Path.GetFileName(plan.Source)}\nСохранить выравнивание в этом PDF."
+                    ? $"{Path.GetFileName(plan.Source)}\nСохранить правки листов в этом PDF."
                     : $"{Path.GetFileName(plan.Source)} → {Path.GetFileName(plan.Target)}"));
             var location = destination is null ? "Сохранение в исходных папках." : $"Папка назначения\n{destination}";
             var message = $"{location}\n\n{summary}\n\n" + string.Join("\n\n", details);

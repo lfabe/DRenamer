@@ -300,7 +300,8 @@ public sealed class RenameService(string journalPath)
     private static MoveResult SaveWithPageEdits(MoveResult plan, string hash, bool copy, Action<RotationRevision> recordPending)
     {
         var editInPlace = string.Equals(plan.Source, plan.Target, StringComparison.OrdinalIgnoreCase);
-        var description = plan.PageAlignments?.Count > 0 ? "выравниванием скана" : "поворотом листов";
+        var description = plan.PageAlignments?.Values.Any(edit => edit.Crop is not null) == true ? "обрезкой листов"
+            : plan.PageAlignments?.Count > 0 ? "выравниванием скана" : "поворотом листов";
         try
         {
             using var input = File.Open(plan.Source, FileMode.Open, FileAccess.Read,
@@ -337,7 +338,7 @@ public sealed class RenameService(string journalPath)
                 });
             } : null);
             if (!published) return Changed(plan);
-            if (editInPlace) return plan with { Status = MoveStatus.Moved, Message = "Скан выровнен в исходном PDF.", ResultHash = rotatedHash };
+            if (editInPlace) return plan with { Status = MoveStatus.Moved, Message = $"Исходный PDF сохранён с {description}.", ResultHash = rotatedHash };
             if (copy) return plan with { Status = MoveStatus.Copied, Message = $"Копия сохранена с {description}." };
 
             try

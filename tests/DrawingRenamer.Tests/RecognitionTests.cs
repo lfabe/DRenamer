@@ -873,6 +873,104 @@ public sealed class RecognitionTests : IDisposable
         };
 
     [Fact]
+    public void CropUsesTheInnerDrawingFrameAndReportsMarksOutsidePaper()
+    {
+        var path = Pdf(new Page(650, 900, 0, """
+            2 w 30 24 590 850 re S
+            1.4 w 86.19 38.31 519.76 821.38 re S
+            0 0 1 rg 13 459 7 7 re f
+            """));
+        using var input = File.OpenRead(path);
+        var crop = Assert.IsType<PageCrop>(new PdfRenderer().FindPageCrop(input, 1, 0, PageAlignment.Original, null, default));
+        Assert.Equal(("А4", 210, 297), (crop.Format, crop.WidthMm, crop.HeightMm));
+        Assert.InRange(crop.Bounds.X * 650, 27, 33);
+        Assert.InRange(crop.Bounds.Y * 900, 23, 29);
+        Assert.InRange(crop.Bounds.Width * 650, 587, 593);
+        Assert.True(crop.HasOutsideInk);
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(90, 3)]
+    public void CropNormalizesPdfPaperAndMarginsAndUndoRestoresOriginal(int rotation, int turn)
+    {
+        var source = Pdf(new Page(650, 900, rotation, """
+            1.4 w 86.19 38.31 519.76 821.38 re S
+            0 0 1 rg 13 459 7 7 re f
+            """));
+        var renderer = new PdfRenderer();
+        PageCrop crop;
+        using (var input = File.OpenRead(source))
+            crop = Assert.IsType<PageCrop>(renderer.FindPageCrop(input, 1, turn, PageAlignment.Original, null, default));
+        var original = RenameService.Hash(source);
+        var service = new RenameService(Path.Combine(folder, "history.json"));
+        var request = new RenameRequest(source, "ABCD.123456.001", "Рама")
+        {
+            ExpectedHash = original,
+            PageAlignments = new Dictionary<int, PageAlignment> { [1] = PageAlignment.Original with { Crop = crop } }
+        };
+
+        var result = Assert.Single(service.Execute([request]));
+        Assert.True(result.Status == MoveStatus.Moved, result.Message);
+        using (var output = File.OpenRead(result.Target!))
+        {
+            var (w, h) = renderer.PageSize(output, 1, default);
+            Assert.Equal(210, w / PageCrop.PointsPerMm, 2);
+            Assert.Equal(297, h / PageCrop.PointsPerMm, 2);
+        }
+        var raster = renderer.Render(result.Target!, 1, Area.Full, 1700, default);
+        var across = Enumerable.Range(0, raster.Width).Where(x => Ink(x, raster.Height / 2)).ToArray();
+        var down = Enumerable.Range(0, raster.Height).Where(y => Ink(raster.Width / 2, y)).ToArray();
+        var left = Center(across, across[0]);
+        var right = Center(across, across[^1]);
+        var top = Center(down, down[0]);
+        var bottom = Center(down, down[^1]);
+        Assert.InRange(left * 210d / raster.Width, 19.7, 20.3);
+        Assert.InRange((raster.Width - right) * 210d / raster.Width, 4.7, 5.3);
+        Assert.InRange(top * 297d / raster.Height, 4.7, 5.3);
+        Assert.InRange((raster.Height - bottom) * 297d / raster.Height, 4.7, 5.3);
+        Assert.Equal(MoveStatus.Undone, Assert.Single(service.Undo()).Status);
+        Assert.Equal(original, RenameService.Hash(source));
+
+        bool Ink(int x, int y) => raster.Pixels[4 * (x + y * raster.Width)] < 128;
+        static double Center(int[] samples, int edge) => samples.Where(value => Math.Abs(value - edge) <= 5).Average() + .5;
+    }
+
+    [Fact]
+    public void CropRejectsAnIncompleteDrawingFrame()
+    {
+        var path = Pdf(new Page(650, 900, 0, """
+            1 w 86 38 m 606 38 l 606 860 l 86 860 l S
+            """));
+        using var input = File.OpenRead(path);
+        Assert.Null(new PdfRenderer().FindPageCrop(input, 1, 0, PageAlignment.Original, null, default));
+    }
+
+    [Fact]
+    public void CropRejectsAFormatOutlineWithoutAnInnerDrawingFrame()
+    {
+        var path = Pdf(new Page(650, 900, 0, "1 w 29 28 595.28 841.89 re S"));
+        using var input = File.OpenRead(path);
+        Assert.Null(new PdfRenderer().FindPageCrop(input, 1, 0, PageAlignment.Original, null, default));
+    }
+
+    [Fact]
+    public void CropKeepsDrawingDetailsOutsideAnInternalTable()
+    {
+        var path = Pdf(new Page(1200, 850, 0, """
+            .7 w 61 18 1120 813 re S
+            2.5 w 188 41 770 567 re S
+            0.1 0.1 0.1 rg
+            72 400 48 215 re f 1030 130 85 65 re f
+            """));
+        using var input = File.OpenRead(path);
+        var crop = Assert.IsType<PageCrop>(new PdfRenderer().FindPageCrop(input, 1, 0, PageAlignment.Original, null, default));
+        Assert.Equal(("А3", 420, 297), (crop.Format, crop.WidthMm, crop.HeightMm));
+        Assert.True(crop.Bounds.X < .03);
+        Assert.True(crop.Bounds.Right > .97);
+    }
+
+    [Fact]
     public void AlignmentKeepsScaleUnlessInkWouldGoPastThePaperEdge()
     {
         var pixels = new byte[4 * 600 * 800];

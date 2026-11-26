@@ -3,6 +3,7 @@ namespace DrawingRenamer;
 public readonly record struct PageAlignment(double Angle, double Scale)
 {
     public static PageAlignment Original => new(0, 1);
+    public PageCrop? Crop { get; init; }
 
     internal static PageAlignment ForScan(Raster raster, double angle, CancellationToken token)
     {
