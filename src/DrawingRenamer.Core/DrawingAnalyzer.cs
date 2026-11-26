@@ -31,12 +31,14 @@ public sealed record RecognitionResult(RecognitionStatus Status, int PageCount, 
     public IReadOnlyDictionary<int, PageAlignment>? PageAlignments { get; init; }
 }
 
-public sealed class DrawingAnalyzer
+public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
 {
     private readonly PdfRenderer renderer = new();
 
     public RecognitionResult Analyze(string path, RecognitionOptions options, CancellationToken token)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        log?.Info("Recognition", $"Started. Source={path}; OCR={options.OcrEnabled}; Languages={options.Languages}");
         var matches = new List<Candidate>();
         var continuations = new List<Candidate>();
         var incomplete = new List<Candidate>();
@@ -79,7 +81,10 @@ public sealed class DrawingAnalyzer
                             if (PdfRenderer.FindPageAlignment(raster, width, height, templates, token) is { } alignment)
                                 pageAlignments[number] = alignment;
                         }
-                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException) { }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
+                        {
+                            log?.Warning("Recognition", $"Alignment detection failed. Source={path}; Page={number}", ex);
+                        }
                     }
                     ScanTitle[]? fittedScans = null;
                     if (found.Count == 0 && options.OcrEnabled)
@@ -205,13 +210,20 @@ public sealed class DrawingAnalyzer
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
+                    log?.Warning("Recognition", $"Page failed. Source={path}; Page={number}", ex);
                     failed++;
                     failure = Diagnostic(ex);
                 }
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
+        catch (OperationCanceledException)
         {
+            log?.Info("Recognition", $"Cancelled. Source={path}; ElapsedMs={clock.ElapsedMilliseconds}");
+            throw;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            log?.Error("Recognition", $"Failed. Source={path}; Pages={pages}; ElapsedMs={clock.ElapsedMilliseconds}", ex);
             return new(RecognitionStatus.Error, pages, [], Diagnostic(ex));
         }
         // A readable scan stamp takes precedence over OCR noise from other tables on that page.
@@ -242,7 +254,10 @@ public sealed class DrawingAnalyzer
                         pairs[i] = pairs[i] with { SheetNumber = ReadSheetNumber(path, pairs[i], sheetLayouts, sheet, options.OcrEnabled, ocr, token) };
                 }
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or PdfDocumentFormatException) { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or PdfDocumentFormatException)
+            {
+                log?.Warning("Recognition", $"Sheet number unavailable. Source={path}", ex);
+            }
         }
         var status = pairs.Length switch
         {
@@ -261,6 +276,7 @@ public sealed class DrawingAnalyzer
             _ when locatedTitle => "Штамп найден, но графы не прочитаны. Заполните пустые графы вручную или выделите текст на листе.",
             _ => "Графы не распознаны. Выделите их на листе или введите данные."
         };
+        log?.Info("Recognition", $"Completed. Source={path}; Status={status}; Pages={pages}; FailedPages={failed}; Candidates={pairs.Length}; ElapsedMs={clock.ElapsedMilliseconds}; {diagnostic}");
         return new(status, pages, pairs, diagnostic) { SourceHash = sourceHash, PageAlignments = pageAlignments };
     }
 

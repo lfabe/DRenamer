@@ -21,7 +21,7 @@ namespace DrawingRenamer;
 
 public sealed partial class MainWindow : Window
 {
-    public MainViewModel ViewModel { get; } = new();
+    public MainViewModel ViewModel { get; } = new(log: App.Log);
     private readonly PdfRenderer renderer = new();
     private CancellationTokenSource? preview;
     private CancellationTokenSource? cropSearch;
@@ -115,6 +115,7 @@ public sealed partial class MainWindow : Window
             cropSearch?.Cancel();
             ViewModel.CancelCommand.Execute(null);
             ViewModel.Renamer.Dispose();
+            App.Log.Info("Application", "Window closed; undo session disposed.");
         };
         UpdateCommands();
     }
@@ -286,7 +287,11 @@ public sealed partial class MainWindow : Window
             if (!closing && files.Count > 0)
                 await ViewModel.AddDocumentsAsync(files.Select(file => file.Path));
         }
-        catch (Exception ex) { ViewModel.Message = $"Не удалось открыть выбор файлов ({ex.GetType().Name})."; }
+        catch (Exception ex)
+        {
+            App.Log.Error("FilePicker", "Cannot pick documents.", ex);
+            ViewModel.Message = $"Не удалось открыть выбор файлов ({ex.GetType().Name}).";
+        }
         finally { choosingDocuments = false; if (!closing) UpdateCommands(); }
     }
 
@@ -305,7 +310,11 @@ public sealed partial class MainWindow : Window
             if (scanner) ViewModel.SetScannerFolder(path);
             else await ViewModel.AddDocumentsAsync([], path);
         }
-        catch (Exception ex) { ViewModel.Message = $"Не удалось выбрать папку ({ex.GetType().Name})."; }
+        catch (Exception ex)
+        {
+            App.Log.Error("FolderPicker", "Cannot pick document/scanner folder.", ex);
+            ViewModel.Message = $"Не удалось выбрать папку ({ex.GetType().Name}).";
+        }
         finally { choosingDocuments = false; if (!closing) UpdateCommands(); }
     }
 
@@ -419,6 +428,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
+            App.Log.Error("Import", "Cannot add dropped files/folders.", ex);
             if (!closing) ViewModel.Message = $"Не удалось добавить перетащенные файлы и папки ({ex.GetType().Name}).";
         }
         finally { choosingDocuments = false; if (!closing) UpdateCommands(); }
@@ -445,6 +455,7 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException
             or System.Runtime.InteropServices.COMException)
         {
+            App.Log.Error("Templates", "Cannot select templates.", ex);
             ViewModel.Message = $"Не удалось прочитать шаблоны ({ex.GetType().Name}).";
         }
     }
@@ -772,6 +783,8 @@ public sealed partial class MainWindow : Window
         catch (OperationCanceledException) { }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
+            if (!operation.IsCancellationRequested)
+                App.Log.Error("Preview", $"Page unavailable. Source={row?.Source}; Page={number}", ex);
             if (!operation.IsCancellationRequested) PreviewMessage.Text = $"Лист недоступен ({ex.GetType().Name}).";
         }
         finally
@@ -889,6 +902,7 @@ public sealed partial class MainWindow : Window
         catch (OperationCanceledException) { }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
         {
+            App.Log.Error("Crop", $"Cannot prepare crop. Source={path}; Page={number}", ex);
             if (!operation.IsCancellationRequested) ViewModel.Message = $"Не удалось подготовить обрезку. {ex.Message}";
         }
         finally
@@ -1145,7 +1159,7 @@ public sealed partial class MainWindow : Window
         try
         {
             var options = await ViewModel.LoadRecognitionOptionsAsync(useDefaultsOnError: true);
-            var template = await Task.Run(() => new DrawingAnalyzer().CreateTemplate(path, number, regions, turn,
+            var template = await Task.Run(() => new DrawingAnalyzer(App.Log).CreateTemplate(path, number, regions, turn,
                 "Шаблон штампа", options, default));
             if (closing || current != row || page != number) return;
             if (template is null)
@@ -1159,6 +1173,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is not OutOfMemoryException and not OperationCanceledException)
         {
+            App.Log.Error("Templates", $"Cannot export template. Source={path}; Page={number}", ex);
             ViewModel.Message = $"Не удалось сохранить шаблон. {ex.Message}";
         }
         finally
@@ -1198,6 +1213,7 @@ public sealed partial class MainWindow : Window
 
         template = template with { Name = templateName.Text.Trim() };
         await Task.Run(() => template.Save(file.Path, newFile));
+        App.Log.Info("Templates", $"Saved. Path={file.Path}; NewFile={newFile}");
         var active = string.Equals(Path.GetFullPath(file.Path), ViewModel.TemplatePath, StringComparison.OrdinalIgnoreCase);
         ViewModel.Message = active ? "Шаблон сохранён и будет применён при следующем распознавании."
             : "Шаблон сохранён. Его можно загрузить в настройках.";
@@ -1308,7 +1324,11 @@ public sealed partial class MainWindow : Window
                     destination = await PickFolderPathAsync() ?? destination;
                     pickerError = null;
                 }
-                catch (Exception ex) { pickerError = $"Не удалось выбрать папку ({ex.GetType().Name})."; }
+                catch (Exception ex)
+                {
+                    App.Log.Error("FolderPicker", "Cannot pick destination.", ex);
+                    pickerError = $"Не удалось выбрать папку ({ex.GetType().Name}).";
+                }
                 continue;
             }
             if (choice == ContentDialogResult.Primary)
@@ -1345,6 +1365,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
         {
+            App.Log.Error("History", "Cannot read rename journal.", ex);
             ViewModel.Message = "Журнал занят, повреждён или недоступен.";
         }
     }

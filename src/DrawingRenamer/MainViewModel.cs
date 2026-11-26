@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -8,8 +9,14 @@ namespace DrawingRenamer;
 public sealed partial class MainViewModel : ObservableObject
 {
     private readonly string settingsPath;
-    public MainViewModel(string? settingsPath = null) =>
+    private readonly DiagnosticLog? log;
+    public MainViewModel(string? settingsPath = null, DiagnosticLog? log = null)
+    {
         this.settingsPath = settingsPath ?? Path.Combine(DataFolder, "settings.json");
+        this.log = log;
+        analyzer = new(log);
+        Renamer = new(Path.Combine(DataFolder, "history.json"), log);
+    }
     [ObservableProperty] public partial int ThemeIndex { get; set; }
     [ObservableProperty] public partial string SettingsMessage { get; set; } = "";
     [ObservableProperty] public partial bool ScannerWatchEnabled { get; set; }
@@ -62,6 +69,7 @@ public sealed partial class MainViewModel : ObservableObject
         try { settings = await Task.Run(() => AppSettingsStore.Load(settingsPath)); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException)
         {
+            log?.Warning("Settings", $"Load failed; using defaults. Path={settingsPath}", ex);
             ApplySettings(new());
             ReportSettings("Не удалось загрузить настройки. Используются значения по умолчанию.");
             return;
@@ -71,11 +79,13 @@ public sealed partial class MainViewModel : ObservableObject
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or
             System.Text.Json.JsonException or ArgumentException or NotSupportedException)
         {
+            log?.Warning("Templates", $"Saved template unavailable; using defaults. Path={settings.TemplatePath}", ex);
             SetTemplates(null);
             ReportSettings("Сохранённый файл шаблонов недоступен. Используются встроенные шаблоны.");
             return;
         }
         if (File.Exists(settingsPath)) ReportSettings("Настройки загружены.");
+        log?.Info("Settings", $"Loaded. Path={settingsPath}; OCR={OcrEnabled}; Languages={Languages}; ScannerWatch={ScannerWatchEnabled}; SplitBatches={SplitScanBatches}");
     });
 
     private void ApplySettings(AppSettings settings)
@@ -97,10 +107,12 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             await Task.Run(() => AppSettingsStore.Save(settingsPath, settings));
+            log?.Info("Settings", $"Saved. Path={settingsPath}");
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
+            log?.Error("Settings", $"Save failed. Path={settingsPath}", ex);
             ReportSettings("Не удалось сохранить настройки. Проверьте доступ к файлу настроек.");
             return false;
         }
@@ -133,7 +145,7 @@ public sealed partial class MainViewModel : ObservableObject
         SettingsMessage = "";
     }
 
-    private readonly DrawingAnalyzer analyzer = new();
+    private readonly DrawingAnalyzer analyzer;
     private readonly HashSet<string> folders = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> individualFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> excludedFiles = new(StringComparer.OrdinalIgnoreCase);
@@ -141,11 +153,12 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly Dictionary<DocumentRow, string> manualMergeAssignments = [];
     private ScannerInbox? scannerInbox;
     private bool checkingScanner;
+    private bool scannerUnavailable;
     private CancellationTokenSource? cancellation;
     private string separator = "_";
     private static readonly string DataFolder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DrawingRenamer");
-    public RenameService Renamer { get; internal init; } = new(Path.Combine(DataFolder, "history.json"));
+    public RenameService Renamer { get; internal init; }
     public ObservableCollection<DocumentRow> Rows { get; } = [];
     [ObservableProperty] internal partial IReadOnlyList<MergeProposal> MergeProposals { get; set; } = [];
     public bool HasDocumentSources => folders.Count > 0 || individualFiles.Count > 0;
@@ -186,6 +199,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
         TemplatePath = path;
         TemplateLabel = path is null ? "Встроенные шаблоны ЕСКД" : Path.GetFileName(path);
+        log?.Info("Templates", $"Selected. Path={path ?? "built-in"}");
         SettingsMessage = "";
     }
 
@@ -201,6 +215,7 @@ public sealed partial class MainViewModel : ObservableObject
         catch (Exception ex) when (useDefaultsOnError && (ex is IOException or UnauthorizedAccessException or
             InvalidDataException or System.Text.Json.JsonException))
         {
+            log?.Warning("Templates", $"Load failed; using defaults. Path={path}", ex);
             return options;
         }
     }
@@ -210,6 +225,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (Busy) return Task.CompletedTask;
         var pdfs = files.Where(IsPdf).Select(path => Path.GetFullPath(path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var sources = directories.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path))).ToArray();
+        log?.Info("Import", $"Requested. Files={pdfs.Count}; Folders={sources.Length}; Recursive={Recursive}; SplitBatches={SplitScanBatches}");
         excludedFiles.ExceptWith(pdfs);
         if (SplitScanBatches && sources.Length == 0)
             return WorkAsync(async () =>
@@ -227,6 +243,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         var count = AddRows(pdfs);
+        log?.Info("Import", $"Added={count}; Queue={Rows.Count}");
         Message = pdfs.Count == 0 ? "Добавьте PDF-файлы или папки."
             : $"Добавлено: {count}. В очереди: {Rows.Count}.";
         return Task.CompletedTask;
@@ -237,6 +254,8 @@ public sealed partial class MainViewModel : ObservableObject
         if (!Path.IsPathFullyQualified(path ?? "")) path = null;
         if (string.Equals(scannerInbox?.Folder, path, StringComparison.OrdinalIgnoreCase)) return;
         scannerInbox = path is null ? null : new(path);
+        scannerUnavailable = false;
+        log?.Info("Scanner", $"Folder selected. Path={path}");
         SettingsMessage = "";
         OnPropertyChanged(nameof(HasScannerFolder));
         OnPropertyChanged(nameof(ScannerFolderLabel));
@@ -254,9 +273,12 @@ public sealed partial class MainViewModel : ObservableObject
             var ignored = Rows.Where(row => split || !IsPending(row)).Select(row => row.Source)
                 .Concat(excludedFiles).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var paths = await Task.Run(() => inbox.FindReadyFiles(ignored, cutoff, handled));
+            if (scannerUnavailable) log?.Info("Scanner", $"Folder available again. Path={inbox.Folder}");
+            scannerUnavailable = false;
             if (!CanScan() || scannerInbox != inbox || split != SplitScanBatches || cutoff != ScannerCreatedAfter?.UtcDateTime || paths.Length == 0) return;
 
             var ready = paths.Where(path => !excludedFiles.Contains(path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            log?.Info("Scanner", $"Ready files={ready.Count}; Folder={inbox.Folder}");
             if (split)
             {
                 await WorkAsync(async () =>
@@ -276,6 +298,8 @@ public sealed partial class MainViewModel : ObservableObject
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
+            if (!scannerUnavailable) log?.Warning("Scanner", $"Folder unavailable. Path={inbox.Folder}", ex);
+            scannerUnavailable = true;
             if (CanScan() && scannerInbox == inbox) Message = "Папка сканера недоступна. Ожидание подключения…";
         }
         finally { checkingScanner = false; }
@@ -311,6 +335,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (activeIndex >= 0 && active is not null && targets.Contains(active))
             Selected = Rows.Count == 0 ? null : Rows[Math.Min(nextIndex, Rows.Count - 1)];
         Message = count == 1 ? $"Удалено из списка: {removed.OriginalName}." : $"Удалено из списка: {count}.";
+        log?.Info("Queue", $"Removed={count}; Queue={Rows.Count}");
     }
 
     internal Task SplitDocumentAsync(DocumentRow row) => WorkAsync(async () =>
@@ -384,7 +409,7 @@ public sealed partial class MainViewModel : ObservableObject
                         discovered.UnionWith(Directory.EnumerateFiles(folder, "*", options)
                             .Where(path => IsPdf(path) && !excludedFiles.Contains(path)));
                     }
-                    catch (DirectoryNotFoundException) { }
+                    catch (DirectoryNotFoundException ex) { log?.Warning("Import", $"Folder missing. Path={folder}", ex); }
                 }
                 return discovered;
             });
@@ -410,6 +435,7 @@ public sealed partial class MainViewModel : ObservableObject
             RefreshMergeProposals();
             Selected = selected is not null && Rows.Contains(selected) ? selected : Rows.FirstOrDefault();
             Message = $"Найдено документов: {Rows.Count}. {warning}".TrimEnd();
+            log?.Info("Import", $"Refreshed. Queue={Rows.Count}; Recursive={recursiveSearch}");
         });
     }
 
@@ -443,19 +469,23 @@ public sealed partial class MainViewModel : ObservableObject
                             continue;
                         }
                     }
+                    log?.Info("Split", $"Started. Source={path}; Manual={manual}");
                     var pages = PdfRenderer.SplitPages(path);
+                    log?.Info("Split", $"Completed. Source={path}; Pages={pages.Length}");
                     ready.AddRange(pages);
                     if (pages.Length > 1)
                     {
                         try { RememberBatchFile(path, input); }
                         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                         {
+                            log?.Warning("Split", $"Receipt save failed. Source={path}", ex);
                             warning = $"Не удалось сохранить отметку о разделении {Path.GetFileName(path)} для следующего сеанса.";
                         }
                     }
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
                 {
+                    log?.Error("Split", $"Failed. Source={path}", ex);
                     if (keepOriginal) ready.Add(path);
                     warning = $"Не удалось разделить {Path.GetFileName(path)}. {ex.Message}";
                 }
@@ -533,6 +563,7 @@ public sealed partial class MainViewModel : ObservableObject
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
             {
+                log?.Error("Merge", $"Cannot attach page. Source={row.Source}", ex);
                 Message = $"Не удалось добавить {row.OriginalName}. {ex.Message}";
                 return;
             }
@@ -579,9 +610,11 @@ public sealed partial class MainViewModel : ObservableObject
         var output = Path.Combine(current.Folder, fileName);
         var inputs = ordered.Select(row => (row.Source, row.SourceHash!, row.PageRotations.GetValueOrDefault(1),
             row.PageAlignments.TryGetValue(1, out var alignment) ? (PageAlignment?)alignment : null)).ToArray();
+        log?.Info("Merge", $"Started. Target={output}; Pages={inputs.Length}; Sources={string.Join("; ", ordered.Select(row => row.Source))}");
         try { await Task.Run(() => PdfRenderer.MergePages(output, inputs)); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
         {
+            log?.Error("Merge", $"Failed. Target={output}", ex);
             Message = $"Не удалось объединить листы. {ex.Message}";
             return;
         }
@@ -597,6 +630,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            log?.Warning("Merge", $"Receipt save failed. Target={output}", ex);
             warning = "Не удалось сохранить отметку о готовом PDF для следующего сеанса.";
         }
 
@@ -619,6 +653,7 @@ public sealed partial class MainViewModel : ObservableObject
         RefreshMergeProposals();
         Selected = merged;
         Message = $"Объединено листов: {ordered.Length}. Создан файл {fileName}. {warning}".TrimEnd();
+        log?.Info("Merge", $"Completed. Target={output}; Pages={ordered.Length}");
     });
 
     private static bool IsPdf(string path) => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase);
@@ -632,6 +667,7 @@ public sealed partial class MainViewModel : ObservableObject
     private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force, bool requireReview = false, bool proposeMerges = false)
     {
         if (Busy || batch.Length == 0) return;
+        log?.Info("Analysis", $"Started. Files={batch.Length}; Force={force}; OCR={OcrEnabled}; Languages={Languages}; Templates={TemplatePath ?? "built-in"}");
         using var operation = new CancellationTokenSource();
         cancellation = operation;
         analysisClock.Restart();
@@ -645,6 +681,7 @@ public sealed partial class MainViewModel : ObservableObject
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
                     InvalidDataException or System.Text.Json.JsonException)
                 {
+                    log?.Error("Templates", $"Analysis cannot load templates. Path={TemplatePath}", ex);
                     Message = "Не удалось загрузить выбранный JSON. Проверьте файл или сбросьте шаблоны в настройках.";
                     return;
                 }
@@ -680,6 +717,7 @@ public sealed partial class MainViewModel : ObservableObject
                 var detail = MergeProposals.Count == 0 ? $"Сохранено подтверждённых: {batch.Length - processed}"
                     : $"Предложения к объединению: {MergeProposals.Count}";
                 Message = $"Распознано: {processed} · Потраченное время {AnalysisElapsed} · {detail}";
+                log?.Info("Analysis", $"Completed. Processed={processed}; Preserved={batch.Length - processed}; ElapsedMs={analysisClock.ElapsedMilliseconds}");
             });
         }
         finally
@@ -702,6 +740,7 @@ public sealed partial class MainViewModel : ObservableObject
         var options = Options;
         await WorkAsync(async () =>
         {
+            log?.Info("ReadRegions", $"Started. Source={row.Source}; Page={page}; Turn={turn}; OCR={options.OcrEnabled}");
             var (hash, candidate) = await Task.Run(() =>
             {
                 using var input = File.OpenRead(row.Source);
@@ -711,6 +750,7 @@ public sealed partial class MainViewModel : ObservableObject
             });
             if (!row.ObserveVersion(hash) || candidate is null) { Message = row.Diagnostic; return; }
             row.Use(candidate);
+            log?.Info("ReadRegions", $"Completed. Source={row.Source}; Page={page}; OCR={candidate.OcrConfidence is not null}");
             RefreshMergeProposals();
             Message = "Проверьте результат и подтвердите значения.";
         });
@@ -826,17 +866,28 @@ public sealed partial class MainViewModel : ObservableObject
         });
     }
 
-    private async Task WorkAsync(Func<Task> work)
+    private async Task WorkAsync(Func<Task> work, [CallerMemberName] string operation = "")
     {
         if (Busy) return;
         Busy = true;
+        var clock = Stopwatch.StartNew();
+        log?.Info(operation, "Started.");
         try { await work(); }
-        catch (OperationCanceledException) { Message = "Анализ отменён. Готовые результаты сохранены в списке."; }
+        catch (OperationCanceledException)
+        {
+            log?.Info(operation, "Cancelled; completed results retained.");
+            Message = "Анализ отменён. Готовые результаты сохранены в списке.";
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException
             or InvalidOperationException or ArgumentException or DllNotFoundException or TypeInitializationException)
         {
+            log?.Error(operation, "Operation interrupted.", ex);
             Message = $"Операция прервана ({ex.GetType().Name}). Проверьте доступ к файлам и журнал.";
         }
-        finally { Busy = false; }
+        finally
+        {
+            log?.Info(operation, $"Finished. ElapsedMs={clock.ElapsedMilliseconds}");
+            Busy = false;
+        }
     }
 }

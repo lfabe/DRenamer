@@ -28,7 +28,7 @@ public sealed class JournalWriteException(IReadOnlyList<MoveResult> completed, E
     public IReadOnlyList<MoveResult> Completed { get; } = completed;
 }
 
-public sealed class RenameService(string journalPath) : IDisposable
+public sealed class RenameService(string journalPath, DiagnosticLog? log = null) : IDisposable
 {
     private readonly object sessionGate = new();
     private readonly PdfUndoStore originals = new(journalPath);
@@ -148,7 +148,19 @@ public sealed class RenameService(string journalPath) : IDisposable
         lock (sessionGate)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
-            return ExecuteCore(requests, skipped, destination, removeOriginals);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            log?.Info("Rename", $"Started. Requests={requests.Count}; Destination={destination ?? "source folders"}; RemoveOriginals={removeOriginals}");
+            try
+            {
+                var results = ExecuteCore(requests, skipped, destination, removeOriginals);
+                log?.Info("Rename", $"Completed. Results={results.Count}; ElapsedMs={clock.ElapsedMilliseconds}");
+                return results;
+            }
+            catch (Exception ex)
+            {
+                log?.Error("Rename", $"Interrupted. Journal={journalPath}", ex);
+                throw;
+            }
         }
     }
 
@@ -197,6 +209,7 @@ public sealed class RenameService(string journalPath) : IDisposable
             {
                 var result = item with { Status = MoveStatus.Skipped };
                 results.Add(result);
+                LogResult("Rename", result);
                 history.Add(new(batch, DateTimeOffset.Now, result, null));
             }
             Persist(history, results);
@@ -208,7 +221,11 @@ public sealed class RenameService(string journalPath) : IDisposable
             var entry = new Entry(batch, DateTimeOffset.Now, result, hash, rotation);
             if (replace) history[^1] = entry;
             else history.Add(entry);
-            if (addResult) results.Add(result);
+            if (addResult)
+            {
+                results.Add(result);
+                LogResult("Rename", result);
+            }
             Persist(history, results, completed: addResult);
         }
     }
@@ -227,6 +244,7 @@ public sealed class RenameService(string journalPath) : IDisposable
         }
         catch (Exception ex) when (IsFileError(ex))
         {
+            log?.Warning("Undo", $"Cannot check journal. Path={journalPath}", ex);
             return false;
         }
     }
@@ -250,7 +268,19 @@ public sealed class RenameService(string journalPath) : IDisposable
         lock (sessionGate)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
-            return UndoCore();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            log?.Info("Undo", $"Started. Journal={journalPath}");
+            try
+            {
+                var results = UndoCore();
+                log?.Info("Undo", $"Completed. Results={results.Count}; ElapsedMs={clock.ElapsedMilliseconds}");
+                return results;
+            }
+            catch (Exception ex)
+            {
+                log?.Error("Undo", $"Interrupted. Journal={journalPath}", ex);
+                throw;
+            }
         }
     }
 
@@ -287,6 +317,7 @@ public sealed class RenameService(string journalPath) : IDisposable
             else
             {
                 results.Add(result);
+                LogResult("Undo", result);
                 PdfUndoStore.Remove(entry.Rotation?.BackupPath);
                 Persist(history, results);
             }
@@ -295,10 +326,19 @@ public sealed class RenameService(string journalPath) : IDisposable
 
         void RecordFailure(MoveResult result)
         {
+            LogResult("Undo", result);
             results.Add(result);
             history.Add(new(last.Batch, DateTimeOffset.Now, result, null));
             Persist(history, results);
         }
+    }
+
+    private void LogResult(string operation, MoveResult result)
+    {
+        var detail = $"Status={result.Status}; Source={result.Source}; Target={result.Target}; {result.Message}; " +
+            $"Rotations={result.PageRotations?.Count ?? 0}; Alignments={result.PageAlignments?.Count ?? 0}";
+        if (result.Status is MoveStatus.Failed or MoveStatus.Skipped) log?.Warning(operation, detail);
+        else log?.Info(operation, detail);
     }
 
     private static bool CanUndo(Entry entry) =>
@@ -306,7 +346,7 @@ public sealed class RenameService(string journalPath) : IDisposable
             entry.Result.Status == MoveStatus.Pending && entry.Rotation is not null) &&
         File.Exists(entry.Result.Target);
 
-    private static MoveResult Copy(MoveResult plan, string hash)
+    private MoveResult Copy(MoveResult plan, string hash)
     {
         try
         {
@@ -368,6 +408,7 @@ public sealed class RenameService(string journalPath) : IDisposable
             }
             catch (Exception ex) when (IsFileError(ex))
             {
+                log?.Warning("Rename", $"Edited PDF saved but source deletion failed. Source={plan.Source}; Target={plan.Target}", ex);
                 return plan with { Status = MoveStatus.Copied, Message = $"PDF с {description} сохранён. Не удалось удалить исходный файл." };
             }
             return plan with { Status = MoveStatus.Moved, Message = $"Файл переименован с {description}.", ResultHash = rotatedHash };
@@ -484,7 +525,7 @@ public sealed class RenameService(string journalPath) : IDisposable
         }
     }
 
-    private static MoveResult RemoveCopy(MoveResult plan, string hash)
+    private MoveResult RemoveCopy(MoveResult plan, string hash)
     {
         try
         {
@@ -516,7 +557,7 @@ public sealed class RenameService(string journalPath) : IDisposable
         Message = "PDF изменился. Проверьте файл и подтвердите значения заново."
     };
 
-    private static MoveResult Move(MoveResult plan, string hash, bool undo)
+    private MoveResult Move(MoveResult plan, string hash, bool undo)
     {
         try
         {
@@ -534,6 +575,7 @@ public sealed class RenameService(string journalPath) : IDisposable
                 try { WindowsFile.Delete(input); }
                 catch (Exception ex) when (!undo && IsFileError(ex))
                 {
+                    log?.Warning("Rename", $"Copy saved but source deletion failed. Source={plan.Source}; Target={plan.Target}", ex);
                     return plan with { Status = MoveStatus.Copied, Message = "Копия сохранена. Не удалось удалить исходный файл." };
                 }
             }
@@ -603,12 +645,16 @@ public sealed class RenameService(string journalPath) : IDisposable
             originals.Dispose();
         }
     }
-    private static string Error(Exception ex) => ex switch
+    private string Error(Exception ex, [System.Runtime.CompilerServices.CallerMemberName] string operation = "")
     {
-        FileNotFoundException or DirectoryNotFoundException => "Файл или папка отсутствует.",
-        UnauthorizedAccessException => "Нет доступа к файлу.",
-        InvalidDataException => ex.Message,
-        DllNotFoundException or EntryPointNotFoundException => "Компонент PDFium для сохранения поворота недоступен.",
-        _ => "Файл занят или целевой путь недоступен."
-    };
+        log?.Error(operation, "File operation failed.", ex);
+        return ex switch
+        {
+            FileNotFoundException or DirectoryNotFoundException => "Файл или папка отсутствует.",
+            UnauthorizedAccessException => "Нет доступа к файлу.",
+            InvalidDataException => ex.Message,
+            DllNotFoundException or EntryPointNotFoundException => "Компонент PDFium для сохранения поворота недоступен.",
+            _ => "Файл занят или целевой путь недоступен."
+        };
+    }
 }
