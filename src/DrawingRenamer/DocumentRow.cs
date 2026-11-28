@@ -61,6 +61,7 @@ public sealed partial class DocumentRow : ObservableObject
     public IReadOnlyList<Candidate> Candidates => Result?.Candidates ?? [];
     public Dictionary<int, int> PageRotations { get; } = [];
     internal Dictionary<int, PageAlignment> PageAlignments { get; } = [];
+    internal Dictionary<int, PageCrop> PendingPageCrops { get; } = [];
     internal IReadOnlyDictionary<int, PageAlignment>? AvailableAlignments { get; private set; }
     internal void SetAvailableAlignments(IReadOnlyDictionary<int, PageAlignment>? alignments)
     {
@@ -94,6 +95,7 @@ public sealed partial class DocumentRow : ObservableObject
         {
             PageRotations.Clear();
             PageAlignments.Clear();
+            PendingPageCrops.Clear();
         }
         MergeEligible = false;
         SheetNumberText = "";
@@ -124,6 +126,8 @@ public sealed partial class DocumentRow : ObservableObject
 
     public void Use(Candidate candidate)
     {
+        if (candidate.Turn != PageRotations.GetValueOrDefault(candidate.Page))
+            PendingPageCrops.Remove(candidate.Page);
         if (candidate.SheetNumber is { } number) SheetNumberText = number.ToString();
         SelectedCandidate = candidate;
         if (candidate.Turn == 0) PageRotations.Remove(candidate.Page);
@@ -151,6 +155,7 @@ public sealed partial class DocumentRow : ObservableObject
         SourceHash = hash;
         if (rotations is not null) PageRotations.Clear();
         if (alignments is not null) PageAlignments.Clear();
+        PendingPageCrops.Clear();
         SetAvailableAlignments(null);
         if (Result is { } result) Result = result with { SourceHash = hash, PageAlignments = null,
             Candidates = result.Candidates.Where(candidate => alignments?.ContainsKey(candidate.Page) != true).Select(Rotate).ToArray() };
@@ -199,6 +204,13 @@ public sealed partial class DocumentRow : ObservableObject
         Confirmed = error is null;
         Status = Confirmed ? "Подтверждено" : "Проверить";
         Diagnostic = error ?? "Значения проверены.";
+        if (Confirmed && PendingPageCrops.Count > 0)
+        {
+            foreach (var (page, crop) in PendingPageCrops)
+                PageAlignments[page] = PageAlignments.GetValueOrDefault(page, PageAlignment.Original) with { Crop = crop };
+            PendingPageCrops.Clear();
+            RefreshSavedPreview();
+        }
         return Confirmed;
     }
 

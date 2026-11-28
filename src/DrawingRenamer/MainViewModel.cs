@@ -723,7 +723,16 @@ public sealed partial class MainViewModel : ObservableObject
                     else row.Apply(result);
                     if (prepared is { } preparation)
                     {
-                        foreach (var (number, alignment) in preparation.Edits) row.PageAlignments[number] = alignment;
+                        row.PendingPageCrops.Clear();
+                        foreach (var (number, alignment) in preparation.Edits)
+                        {
+                            row.PageAlignments[number] = alignment with { Crop = null };
+                            if (alignment.Crop is { } crop)
+                            {
+                                row.PendingPageCrops[number] = crop;
+                                row.PageRotations[number] = crop.Turns;
+                            }
+                        }
                         row.Confirmed = false;
                         row.Status = "Проверить";
                         row.Diagnostic = preparation.Message;
@@ -791,8 +800,8 @@ public sealed partial class MainViewModel : ObservableObject
         }
         var review = result.PageCount - cropped;
         log?.Info("ScanPreparation", $"Prepared. Source={path}; Cropped={cropped}; Review={review}");
-        return (edits, $"Автоподготовка · Обрезано листов: {cropped} · Проверьте обрезку вручную: {review}. " +
-            "Правки сохранятся при переименовании или объединении. Проверьте графы и подтвердите значения.");
+        return (edits, $"Автоподготовка · Предложена обрезка листов: {cropped} · Проверьте обрезку вручную: {review}. " +
+            "Проверьте контур и графы. Обрезка применится после подтверждения и сохранится при переименовании или объединении.");
     }
 
     private readonly Stopwatch analysisClock = new();

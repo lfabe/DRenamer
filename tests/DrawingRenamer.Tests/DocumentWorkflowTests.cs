@@ -14,6 +14,24 @@ public sealed class DocumentWorkflowTests : IDisposable
     }
 
     [Fact]
+    public void CropProposalRequiresValidConfirmationAndIsDiscardedWhenPdfChanges()
+    {
+        var row = ConfirmedRow("crop.pdf");
+        var crop = new PageCrop("А4", 210, 297, new(.05, .05, .9, .9), 0, false);
+        row.PendingPageCrops[1] = crop;
+        row.Designation = "";
+        Assert.False(row.Confirm(row.SourceHash!));
+        Assert.Empty(row.PageAlignments);
+        Assert.Same(crop, row.PendingPageCrops[1]);
+
+        row.Designation = "A";
+        Assert.False(row.Confirm("changed-pdf"));
+        Assert.Empty(row.PendingPageCrops);
+        Assert.Empty(row.PageAlignments);
+        Assert.False(row.Confirmed);
+    }
+
+    [Fact]
     public void ChangingSeparatorUpdatesNamesAndRequestsWithoutLosingValidConfirmation()
     {
         var model = new MainViewModel();

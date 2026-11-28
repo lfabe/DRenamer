@@ -996,23 +996,40 @@ public sealed class RecognitionTests : IDisposable
 
         Assert.Equal(split ? 2 : 1, model.Rows.Count);
         Assert.Equal(2, model.Rows.Sum(row => row.PageAlignments.Count));
+        Assert.Equal(2, model.Rows.Sum(row => row.PendingPageCrops.Count));
         Assert.Equal(tilted, model.Rows.SelectMany(row => row.PageAlignments.Values).Any(edit => Math.Abs(edit.Angle) > .3));
         Assert.All(model.Rows, row =>
         {
             Assert.Equal("Проверить", row.Status);
             Assert.False(row.Confirmed);
-            Assert.All(row.PageAlignments.Values, edit =>
+            Assert.All(row.PageAlignments.Values, edit => Assert.Null(edit.Crop));
+            Assert.All(row.PendingPageCrops.Values, crop =>
             {
-                Assert.NotNull(edit.Crop);
-                Assert.False(edit.Crop.HasOutsideInk);
-                Assert.Equal("А4", edit.Crop.Format);
+                Assert.False(crop.HasOutsideInk);
+                Assert.Equal("А4", crop.Format);
             });
+            Assert.All(row.Request.PageAlignments!.Values, edit => Assert.Null(edit.Crop));
         });
         var files = Directory.GetFiles(inbox, "*.pdf").ToDictionary(path => path, RenameService.Hash);
         await model.CheckScannerFolderAsync(() => true);
         await model.CheckScannerFolderAsync(() => true);
         Assert.Equal(split ? 2 : 1, model.Rows.Count);
         Assert.Equal(hash, RenameService.Hash(source));
+        Assert.All(files, file => Assert.Equal(file.Value, RenameService.Hash(file.Key)));
+
+        foreach (var row in model.Rows)
+        {
+            row.Designation = "ABCD.123456.001";
+            row.DocumentName = "Рама";
+        }
+        if (split) await model.ConfirmIncludedAsync();
+        else await model.ConfirmAsync(model.Rows[0]);
+        Assert.All(model.Rows, row =>
+        {
+            Assert.True(row.Confirmed);
+            Assert.Empty(row.PendingPageCrops);
+            Assert.All(row.PageAlignments.Values, edit => Assert.NotNull(edit.Crop));
+        });
         Assert.All(files, file => Assert.Equal(file.Value, RenameService.Hash(file.Key)));
     }
 
@@ -1036,6 +1053,7 @@ public sealed class RecognitionTests : IDisposable
 
         var row = Assert.Single(model.Rows);
         Assert.DoesNotContain(row.PageAlignments.Values, alignment => alignment.Crop is not null);
+        Assert.Empty(row.PendingPageCrops);
         Assert.Contains("вручную: 1", row.Diagnostic);
         Assert.False(row.Confirmed);
     }

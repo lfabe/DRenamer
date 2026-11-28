@@ -76,7 +76,7 @@
                                                   IsOn="{x:Bind ViewModel.SplitScanBatches, Mode=TwoWay}"/>
                                     <ToggleSwitch Header="Выравнивать и обрезать сканы" OnContent="Включено" OffContent="Выключено"
                                                   IsOn="{x:Bind ViewModel.AutoPrepareScans, Mode=TwoWay}"/>
-                                    <TextBlock Text="Правки появятся в просмотре. После проверки сохраните их переименованием или объединением."
+                                    <TextBlock Text="Проверьте контур обрезки в просмотре и подтвердите значения. Сохраните правки переименованием или объединением."
                                                TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}"/>
                                 </StackPanel>
                                 <TextBlock Text="{x:Bind ViewModel.TemplateLabel, Mode=OneWay}" TextWrapping="Wrap"/>
@@ -342,6 +342,7 @@
                                                    AutomationProperties.Name="Изображение листа PDF"/>
                                             <Canvas x:Name="Overlays" IsHitTestVisible="False"/>
                                         </Canvas>
+                                        <Canvas x:Name="CropOverlays" IsHitTestVisible="False"/>
                                     </Canvas>
                                 </Canvas>
                             </ScrollViewer>
