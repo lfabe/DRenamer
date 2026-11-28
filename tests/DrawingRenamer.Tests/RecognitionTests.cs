@@ -966,6 +966,80 @@ public sealed class RecognitionTests : IDisposable
         Assert.Null(new PdfRenderer().FindPageCrop(input, 1, 0, PageAlignment.Original, null, default));
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ScannerAutomaticallyPreparesEveryPageForOperatorReview(bool split, bool tilted)
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var source = Path.Combine(inbox, "batch.pdf");
+        var framed = new Page(650, 900, 0, "1.4 w 86.19 38.31 519.76 821.38 re S");
+        var first = tilted ? framed with
+        {
+            Content = "q .999962 .008727 -.008727 .999962 3.94 -2.82 cm " + framed.Content + " Q"
+        } : framed;
+        File.Copy(Pdf(first, framed), source);
+        var hash = RenameService.Hash(source);
+        using var renamer = new RenameService(Path.Combine(folder, "history.json"));
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"))
+        {
+            Renamer = renamer, OcrEnabled = false, ScannerWatchEnabled = true,
+            ScannerCreatedAfter = DateTimeOffset.MinValue, AutoPrepareScans = true, SplitScanBatches = split
+        };
+        model.SetScannerFolder(inbox);
+
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Empty(model.Rows);
+        await model.CheckScannerFolderAsync(() => true);
+
+        Assert.Equal(split ? 2 : 1, model.Rows.Count);
+        Assert.Equal(2, model.Rows.Sum(row => row.PageAlignments.Count));
+        Assert.Equal(tilted, model.Rows.SelectMany(row => row.PageAlignments.Values).Any(edit => Math.Abs(edit.Angle) > .3));
+        Assert.All(model.Rows, row =>
+        {
+            Assert.Equal("Проверить", row.Status);
+            Assert.False(row.Confirmed);
+            Assert.All(row.PageAlignments.Values, edit =>
+            {
+                Assert.NotNull(edit.Crop);
+                Assert.False(edit.Crop.HasOutsideInk);
+                Assert.Equal("А4", edit.Crop.Format);
+            });
+        });
+        var files = Directory.GetFiles(inbox, "*.pdf").ToDictionary(path => path, RenameService.Hash);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+        Assert.Equal(split ? 2 : 1, model.Rows.Count);
+        Assert.Equal(hash, RenameService.Hash(source));
+        Assert.All(files, file => Assert.Equal(file.Value, RenameService.Hash(file.Key)));
+    }
+
+    [Fact]
+    public async Task ScannerLeavesUnsafeCropForManualReview()
+    {
+        var inbox = Directory.CreateDirectory(Path.Combine(folder, "scanner")).FullName;
+        var source = Path.Combine(inbox, "scan.pdf");
+        File.Copy(Pdf(new Page(650, 900, 0, """
+            1.4 w 86.19 38.31 519.76 821.38 re S
+            0 0 1 rg 13 459 7 7 re f
+            """)), source);
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"))
+        {
+            OcrEnabled = false, ScannerWatchEnabled = true, AutoPrepareScans = true,
+            ScannerCreatedAfter = DateTimeOffset.MinValue
+        };
+        model.SetScannerFolder(inbox);
+        await model.CheckScannerFolderAsync(() => true);
+        await model.CheckScannerFolderAsync(() => true);
+
+        var row = Assert.Single(model.Rows);
+        Assert.DoesNotContain(row.PageAlignments.Values, alignment => alignment.Crop is not null);
+        Assert.Contains("вручную: 1", row.Diagnostic);
+        Assert.False(row.Confirmed);
+    }
+
     [Fact]
     public void CropRejectsAFormatOutlineWithoutAnInnerDrawingFrame()
     {

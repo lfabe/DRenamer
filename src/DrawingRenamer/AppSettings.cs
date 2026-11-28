@@ -4,7 +4,7 @@ namespace DrawingRenamer;
 
 internal sealed record AppSettings(int ThemeIndex = 0, string Separator = "_", bool OcrEnabled = true,
     string Languages = "rus", string? TemplatePath = null, string? ScannerFolder = null, bool ScannerWatchEnabled = false,
-    DateTimeOffset? ScannerCreatedAfter = null, bool SplitScanBatches = false);
+    DateTimeOffset? ScannerCreatedAfter = null, bool SplitScanBatches = false, bool AutoPrepareScans = false);
 
 internal static class AppSettingsStore
 {
