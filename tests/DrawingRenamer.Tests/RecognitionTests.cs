@@ -822,22 +822,24 @@ public sealed class RecognitionTests : IDisposable
         Assert.Equal(hash, RenameService.Hash(path));
     }
 
-    [Fact]
-    public async Task RecognitionKeepsAnUnframedStampForReviewWithoutPreparingCrop()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecognitionRequiresFrameReviewOnlyWhenScanPreparationIsEnabled(bool prepare)
     {
         var path = Pdf(Sheet(595, 842, 0));
         var result = new DrawingAnalyzer().Analyze(path, new(false) { DetectPageAlignment = true }, default);
-        Assert.Equal(RecognitionStatus.Review, result.Status);
+        Assert.Equal(RecognitionStatus.Ready, result.Status);
         Assert.Single(result.Candidates);
         Assert.Empty(result.PageAlignments!);
         Assert.Contains("Основная рамка", result.Diagnostic);
 
-        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { AutoPrepareScans = true, OcrEnabled = false };
+        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { AutoPrepareScans = prepare, OcrEnabled = false };
         var row = new DocumentRow(path);
         model.Rows.Add(row);
         await model.AnalyzeCommand.ExecuteAsync(null);
-        Assert.Equal("Проверить", row.Status);
-        Assert.False(row.Confirmed);
+        Assert.Equal(prepare ? "Проверить" : "Готово", row.Status);
+        Assert.Equal(!prepare, row.Confirmed);
         Assert.Empty(row.PageAlignments);
         Assert.Empty(row.PendingPageCrops);
     }
@@ -1099,7 +1101,7 @@ public sealed class RecognitionTests : IDisposable
         await model.CheckScannerFolderAsync(() => true);
 
         Assert.Equal(split ? 2 : 1, model.Rows.Count);
-        Assert.Equal(2, model.Rows.Sum(row => row.PageAlignments.Count));
+        Assert.Equal(tilted ? 1 : 0, model.Rows.Sum(row => row.PageAlignments.Count));
         Assert.Equal(2, model.Rows.Sum(row => row.PendingPageCrops.Count));
         Assert.Equal(tilted, model.Rows.SelectMany(row => row.PageAlignments.Values).Any(edit => Math.Abs(edit.Angle) > .3));
         Assert.All(model.Rows, row =>
@@ -1112,7 +1114,7 @@ public sealed class RecognitionTests : IDisposable
                 Assert.False(crop.HasOutsideInk);
                 Assert.Equal("А4", crop.Format);
             });
-            Assert.All(row.Request.PageAlignments!.Values, edit => Assert.Null(edit.Crop));
+            Assert.All(row.Request.PageAlignments?.Values ?? [], edit => Assert.Null(edit.Crop));
         });
         var files = Directory.GetFiles(inbox, "*.pdf").ToDictionary(path => path, RenameService.Hash);
         await model.CheckScannerFolderAsync(() => true);
@@ -1160,6 +1162,82 @@ public sealed class RecognitionTests : IDisposable
         Assert.Empty(row.PendingPageCrops);
         Assert.Contains("вручную: 1", row.Diagnostic);
         Assert.False(row.Confirmed);
+    }
+
+    [Fact]
+    public async Task CancellingAutomaticCropThenRenamingKeepsOriginalPdfBytes()
+    {
+        var source = Pdf(new Page(650, 900, 0, "1.4 w 86.19 38.31 519.76 821.38 re S"));
+        var originalHash = RenameService.Hash(source);
+        using var renamer = new RenameService(Path.Combine(folder, "history.json"));
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"))
+            { Renamer = renamer, AutoPrepareScans = true, OcrEnabled = false };
+        var row = new DocumentRow(source);
+        model.Rows.Add(row);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        Assert.Single(row.PendingPageCrops);
+        row.PendingPageCrops.Remove(1);
+        row.Designation = "ABCD.123456.001";
+        row.DocumentName = "Рама";
+        await model.ConfirmIncludedAsync();
+        Assert.True(row.Confirmed);
+        Assert.Null(row.Request.PageAlignments);
+        Assert.Null(row.Request.PageRotations);
+        await model.MoveAsync([row.Request]);
+        Assert.Equal("Переименован", row.Status);
+        Assert.Equal(originalHash, RenameService.Hash(row.Source));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfirmingContinuationInAGroupAppliesItsCropBeforeMerge(bool batch)
+    {
+        const string frame = "\n0.7 w 56 14 525 814 re S";
+        var firstPage = NumberedSheet("ABCD.123456.001", 1);
+        var nextPage = ContinuationSheet(595, 842, 0, left: false);
+        var first = Pdf(firstPage with { Content = firstPage.Content + frame });
+        var next = Pdf(nextPage with { Content = nextPage.Content.Replace("Group A", "ABCD.123456.001") + frame });
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"))
+            { AutoPrepareScans = true, OcrEnabled = false, SplitScanBatches = true };
+        model.Rows.Add(new(first));
+        model.Rows.Add(new(next));
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        var group = Assert.Single(model.MergeProposals);
+        Assert.True(group.CanMerge);
+        var continuation = group.Ordered[1];
+        Assert.Empty(continuation.DocumentName);
+        Assert.Single(continuation.PendingPageCrops);
+        if (batch) await model.ConfirmIncludedAsync();
+        else foreach (var row in group.Ordered) await model.ConfirmAsync(row);
+        Assert.All(group.Pages, row => Assert.True(row.Confirmed));
+        Assert.Empty(continuation.PendingPageCrops);
+        Assert.NotNull(continuation.PageAlignments[1].Crop);
+        Assert.Empty(continuation.DocumentName);
+        var target = Path.Combine(folder, group.FileName!);
+        await model.MergeAsync(group);
+        using var output = File.OpenRead(target);
+        var renderer = new PdfRenderer();
+        Assert.Equal(2, renderer.CountPages(output, default));
+        for (var page = 1; page <= 2; page++)
+        {
+            var size = renderer.PageSize(output, page, default);
+            Assert.Equal(210 * 72d / 25.4, size.Width, 3);
+            Assert.Equal(297 * 72d / 25.4, size.Height, 3);
+        }
+    }
+
+    [Fact]
+    public async Task AutomaticPreparationPreservesPasswordErrorInTheQueue()
+    {
+        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { AutoPrepareScans = true };
+        var row = new DocumentRow(Path.Combine(AppContext.BaseDirectory, "protected.pdf"));
+        model.Rows.Add(row);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        Assert.Equal("Ошибка", row.Status);
+        Assert.Contains("паролем", row.Diagnostic);
+        Assert.Empty(row.PendingPageCrops);
+        Assert.Empty(row.PageAlignments);
     }
 
     [Fact]

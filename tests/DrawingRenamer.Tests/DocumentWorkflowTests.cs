@@ -32,6 +32,45 @@ public sealed class DocumentWorkflowTests : IDisposable
     }
 
     [Fact]
+    public void RenameRequestsExcludeNoOpEditsAndKeepActualPageChanges()
+    {
+        var row = ConfirmedRow("unchanged.pdf");
+        row.PageRotations[1] = 0;
+        row.PageAlignments[1] = PageAlignment.Original;
+        Assert.Null(row.Request.PageRotations);
+        Assert.Null(row.Request.PageAlignments);
+        row.PageRotations[2] = 1;
+        row.PageAlignments[2] = new(.5, 1);
+        Assert.Equal(2, Assert.Single(row.Request.PageRotations!).Key);
+        Assert.Equal(2, Assert.Single(row.Request.PageAlignments!).Key);
+    }
+
+    [Fact]
+    public void ContinuationConfirmationStillValidatesNamesAndIsRevokedOutsideTheGroup()
+    {
+        var first = ConfirmedRow("first.pdf");
+        var next = ConfirmedRow("next.pdf");
+        next.Use(new("A", "", 1, 0, new(Area.Full, default), "PDF"));
+        next.InMergeProposal = true;
+        next.PendingPageCrops[1] = new("А4", 210, 297, new(.05, .05, .9, .9), 0, false);
+        Assert.False(next.Confirm(next.SourceHash!));
+        next.Designation = "A/";
+        Assert.False(next.Confirm(next.SourceHash!, first));
+        next.Designation = "A";
+        first.DocumentName = "";
+        Assert.False(next.Confirm(next.SourceHash!, first));
+        Assert.Single(next.PendingPageCrops);
+        first.DocumentName = "PART";
+        Assert.True(next.Confirm(next.SourceHash!, first));
+        Assert.Empty(next.DocumentName);
+        Assert.Empty(next.PendingPageCrops);
+        Assert.NotNull(next.PageAlignments[1].Crop);
+        next.InMergeProposal = false;
+        Assert.False(next.Confirmed);
+        Assert.NotNull(next.NameError);
+    }
+
+    [Fact]
     public void ChangingSeparatorUpdatesNamesAndRequestsWithoutLosingValidConfirmation()
     {
         var model = new MainViewModel();

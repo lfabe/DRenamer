@@ -284,8 +284,6 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
             1 when pairs[0].Verified && failed == 0 => RecognitionStatus.Ready,
             _ => RecognitionStatus.Review
         };
-        if (status == RecognitionStatus.Ready && pageAlignments is not null && pageAlignments.Count < pages)
-            status = RecognitionStatus.Review;
         var diagnostic = status switch
         {
             RecognitionStatus.Ready => "Графы подтверждены геометрией штампа.",

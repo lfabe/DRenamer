@@ -715,7 +715,8 @@ public sealed partial class MainViewModel : ObservableObject
                     var result = await Task.Run(() => analyzer.Analyze(row.Source,
                         options with { ReadSheetNumber = proposeMerges, DetectPageAlignment = true,
                             SavedPageAlignments = savedPageAlignments }, operation.Token));
-                    (Dictionary<int, PageAlignment> Edits, string Message)? prepared = prepareScans ? await Task.Run(() =>
+                    (Dictionary<int, PageAlignment> Edits, string Message)? prepared =
+                        prepareScans && result.Status != RecognitionStatus.Error && result.SourceHash is not null ? await Task.Run(() =>
                         PrepareScanPages(row.Source, result, operation.Token), operation.Token) : null;
                     operation.Token.ThrowIfCancellationRequested();
                     if (requireReview && result.Status == RecognitionStatus.Ready)
@@ -728,11 +729,14 @@ public sealed partial class MainViewModel : ObservableObject
                         row.PendingPageCrops.Clear();
                         foreach (var (number, alignment) in preparation.Edits)
                         {
-                            row.PageAlignments[number] = alignment with { Crop = null };
+                            var leveling = alignment with { Crop = null };
+                            if (leveling == PageAlignment.Original) row.PageAlignments.Remove(number);
+                            else row.PageAlignments[number] = leveling;
                             if (alignment.Crop is { } crop)
                             {
                                 row.PendingPageCrops[number] = crop;
-                                row.PageRotations[number] = crop.Turns;
+                                if (crop.Turns == 0) row.PageRotations.Remove(number);
+                                else row.PageRotations[number] = crop.Turns;
                             }
                         }
                         row.Confirmed = false;
@@ -866,10 +870,11 @@ public sealed partial class MainViewModel : ObservableObject
         });
     }
 
-    private static async Task<bool> ConfirmRowAsync(DocumentRow row)
+    private async Task<bool> ConfirmRowAsync(DocumentRow row)
     {
         var hash = await Task.Run(() => ReadVersion(row.Source));
-        return hash is null ? row.ObserveVersion(null) : row.Confirm(hash);
+        var namedSheet = MergeProposals.FirstOrDefault(group => group.Pages.Contains(row))?.NamedSheet;
+        return hash is null ? row.ObserveVersion(null) : row.Confirm(hash, namedSheet);
     }
 
     public async Task MoveAsync(IReadOnlyList<RenameRequest>? requests, IReadOnlyList<MoveResult>? skipped = null,
