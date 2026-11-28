@@ -4,7 +4,7 @@ internal sealed record ScanTitle(FieldRegions Regions, int Turn, double Slope, I
     TitleTemplate Template, Area? NameWithDescenders)
 {
     internal ScanTitle OnOriginalPage(int turn) => new(new(Regions.Designation.Rotate(-turn),
-        Regions.Name.Rotate(-turn), Regions.TitleBlock?.Rotate(-turn)), turn, Slope,
+        Regions.Name.IsValid ? Regions.Name.Rotate(-turn) : default, Regions.TitleBlock?.Rotate(-turn)), turn, Slope,
         NameLines.Select(line => line.Rotate(-turn)).ToArray(), Template, NameWithDescenders?.Rotate(-turn));
 }
 
@@ -16,7 +16,8 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
     internal static IEnumerable<ScanTitle> Find(Raster raster, double pageWidth, double pageHeight,
         IReadOnlyList<TitleTemplate> templates, Func<int, Raster> renderUpright, CancellationToken token)
     {
-        var layouts = templates.Where(t => t.PageTurn is null).ToLookup(t => t.WidthMm);
+        var layouts = templates.Where(t => t.PageTurn is null)
+            .Concat([TitleLocator.RightContinuation, TitleLocator.LeftContinuation]).ToLookup(t => t.WidthMm);
         for (var turn = 0; turn < 4; turn++)
         {
             var view = new ScanTitleLocator(raster, turn);
@@ -72,12 +73,25 @@ internal sealed class ScanTitleLocator(Raster raster, int turn)
                     !template.HorizontalRules.All(y => HasRule(grid, .77, y, .90, y))) continue;
                 if (template == TitleTemplate.ConstructionWorkingDrawing &&
                     !HasRule(grid, template.Title.X, template.Title.Y, 1, template.Title.Y)) continue;
+                if (!template.Title.IsValid)
+                {
+                    var revisionOnRight = template.Designation.X < .1;
+                    var revisionStart = revisionOnRight ? 120d / 185 : 0;
+                    var revisionEnd = revisionStart + 65d / 185;
+                    if (!HasRule(grid, revisionStart, 1d / 3, revisionEnd, 1d / 3) ||
+                        !HasRule(grid, revisionStart, 2d / 3, revisionEnd, 2d / 3) ||
+                        !HasRule(grid, revisionOnRight ? revisionStart : template.Designation.X, 0,
+                            revisionOnRight ? revisionStart : template.Designation.X, 1) ||
+                        !HasRule(grid, revisionOnRight ? template.Designation.X : 175d / 185, 0,
+                            revisionOnRight ? template.Designation.X : 175d / 185, 1)) continue;
+                }
 
                 var designation = FitText(grid, template.Designation, null, out _);
                 if (!designation.IsValid) continue;
                 var lines = new List<Area>();
-                var name = FitText(grid, template.Title, lines, out var nameWithDescenders);
-                if (!name.IsValid) continue;
+                Area? nameWithDescenders = null;
+                var name = template.Title.IsValid ? FitText(grid, template.Title, lines, out nameWithDescenders) : default;
+                if (template.Title.IsValid && !name.IsValid) continue;
                 var frame = grid.Bounds(width, height).Rotate(-turn);
                 yield return new(new(designation, name, frame), turn, slope, lines, template, nameWithDescenders);
             }

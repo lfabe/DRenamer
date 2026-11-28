@@ -1161,6 +1161,56 @@ public sealed class RecognitionTests : IDisposable
         Assert.False(candidate.Verified);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SelectedDesignationDoesNotRequireANameRegion(bool useOcr)
+    {
+        var path = Pdf(ContinuationSheet(595, 842, 90, left: false));
+        var analyzer = new DrawingAnalyzer();
+        var located = Assert.Single(analyzer.Analyze(path, new(false), default).Candidates);
+        var candidate = analyzer.ReadRegions(path, 1, located.Regions, located.Turn, new(useOcr), default);
+
+        Assert.Equal("Group A", candidate.Designation);
+        Assert.Empty(candidate.Name);
+        Assert.False(candidate.Regions.Name.IsValid);
+        Assert.Equal("PDF", candidate.Method);
+        Assert.Throws<ArgumentException>(() => analyzer.ReadRegions(path, 1, new(default, default), 0, new(useOcr), default));
+    }
+
+    [Fact]
+    public void SelectedDesignationCanBeReadFromAScanWithoutANameRegion()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "scan-italic.pdf");
+        var candidate = new DrawingAnalyzer().ReadRegions(path, 1, new(new(.12, .08, .80, .25), default),
+            0, new(), default);
+
+        Assert.Equal("АБВГ.123456.001", candidate.Designation);
+        Assert.Empty(candidate.Name);
+        Assert.Equal("OCR", candidate.Method);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void SkewedSpecificationContinuationReadsItsStampInsteadOfTheTable(int turn)
+    {
+        var path = Path.Combine(folder, "continuation.pdf");
+        using (var input = File.OpenRead(Path.Combine(AppContext.BaseDirectory, "scan-continuation-skewed.pdf")))
+        using (var output = File.Create(path))
+            PdfRenderer.SavePageEdits(input, output, new Dictionary<int, int> { [1] = turn }, null);
+        var result = new DrawingAnalyzer().Analyze(path, new(true, "rus") { ReadSheetNumber = true }, default);
+
+        Assert.Equal(RecognitionStatus.Review, result.Status);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal("АБВГ.123456.001", candidate.Designation);
+        Assert.Empty(candidate.Name);
+        Assert.False(candidate.Regions.Name.IsValid);
+        Assert.Equal(2, candidate.SheetNumber);
+    }
+
     [Fact]
     public void ReadsDesignationInAFadedInclinedScan()
     {

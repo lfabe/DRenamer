@@ -190,7 +190,8 @@ public sealed partial class MainWindow : Window
         UpdateDeskewButton();
         ToggleRegionsButton.IsEnabled = StartManualRegionsButton.IsEnabled = available;
         MarkDesignationButton.IsEnabled = MarkNameButton.IsEnabled = MarkStampButton.IsEnabled = available;
-        ReadRegionsButton.IsEnabled = SaveRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
+        ReadRegionsButton.IsEnabled = available && designation.HasValue;
+        SaveRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
         EmptyQueue.Visibility = ViewModel.Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -1029,7 +1030,7 @@ public sealed partial class MainWindow : Window
                 result.Candidates is [{ } candidate] &&
                 (string.IsNullOrWhiteSpace(candidate.Designation) || string.IsNullOrWhiteSpace(candidate.Name))) &&
             (string.IsNullOrWhiteSpace(row.Designation) || (!row.HasDocumentName &&
-                !(row.InMergeProposal && row.SelectedCandidate?.Regions.Name.IsValid == false)));
+                row.SelectedCandidate?.Regions.Name.IsValid != false));
         ManualRegionsNotice.IsOpen = RegionControls.Visibility == Visibility.Visible &&
             RegionActions.Visibility == Visibility.Collapsed && needsFields;
         ToggleRegionsButton.Visibility = ManualRegionsNotice.IsOpen ? Visibility.Collapsed : Visibility.Visible;
@@ -1092,7 +1093,7 @@ public sealed partial class MainWindow : Window
                 : (designation.HasValue, name.HasValue) switch
                 {
                     (true, true) => "Выделены обе графы. Нажмите «Прочитать графы».",
-                    (true, false) => "Выберите «Наименование» и обведите графу.",
+                    (true, false) => "Нажмите «Прочитать графы». Если на листе есть наименование, его можно выделить дополнительно.",
                     _ => "Выберите «Обозначение» и обведите графу."
                 };
         }
@@ -1146,10 +1147,10 @@ public sealed partial class MainWindow : Window
 
     private async void ReadRegions(object sender, RoutedEventArgs e)
     {
-        if (!CanChangeDocuments || current is not { } row || designation is not { } first || name is not { } second) return;
+        if (!CanChangeDocuments || current is not { } row || designation is not { } first) return;
         var number = page;
         var selected = row.SelectedCandidate;
-        await ViewModel.ReadAsync(row, number, new(first, second), RegionTurn);
+        await ViewModel.ReadAsync(row, number, new(first, name ?? default), RegionTurn);
         if (current == row && page == number && !ReferenceEquals(selected, row.SelectedCandidate))
             await SelectPageAsync(number);
     }

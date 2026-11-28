@@ -44,6 +44,14 @@ def scan(output):
     stamp.text((780, 2206), "АБВГ.123456.001", font=font, fill="black")
     stamp.text((1554, 2228), "2", font=ImageFont.truetype(FONT, 44), fill="black")
     continuation.save(output / "scan-numbered-batch.pdf", resolution=200, save_all=True, append_images=[numbered])
+    # A specification continuation whose table shares the stamp's side rules.
+    stamp.rectangle((left, 78, right, 2182), outline="black", width=4)
+    for x in (left + 38, left + 78, left + 130, left + 650, left + 1120):
+        stamp.line((x, 78, x, 2182), fill="black", width=4)
+    for y in range(180, 2182, 55):
+        stamp.line((left, y, right, y), fill="black", width=3)
+    tilted = continuation.rotate(.18, Image.Resampling.BICUBIC, expand=False, fillcolor="white")
+    tilted.save(output / "scan-continuation-skewed.pdf", resolution=200)
     # A clipped bottom rule and a tilted, sideways scan with text in both cells.
     draw.rectangle((690, 1880, 1590, 1970), fill="white")
     draw.text((780, 1894), "АБВГ.123456-02", font=font, fill="black")

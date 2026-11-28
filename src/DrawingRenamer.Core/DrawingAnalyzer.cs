@@ -176,6 +176,12 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
                                 with { Template = stamp.Template };
                             locatedTitle = true;
                             if (!HasBothFields(candidate)) candidate = ReadOcr(path, candidate, ocr, token, stamp);
+                            if (!stamp.Template.Title.IsValid)
+                            {
+                                if (candidate.Designation.Length > 0 && candidate.OcrConfidence is not < .35)
+                                    continuations.Add(candidate);
+                                continue;
+                            }
                             // Preserve separators already read from this same stamp; never invent missing digits or dots.
                             var sameStamp = matches.Where(c => c.Page == number && c.Turn == candidate.Turn &&
                                 c.Regions.TitleBlock is { } previous && stamp.Regions.TitleBlock is { } fitted &&
@@ -271,7 +277,7 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
             RecognitionStatus.Ready => "Графы подтверждены геометрией штампа.",
             _ when failed > 0 => $"Страниц с ошибкой: {failed} из {pages}. {failure}",
             _ when pairs.Length > 1 => "Найдено несколько пар. Выберите правильный вариант.",
-            _ when continuationOnly => "Найден штамп последующего листа. Введите наименование вручную.",
+            _ when continuationOnly => "Найден штамп последующего листа. На этом листе есть только обозначение.",
             RecognitionStatus.Review => "Проверьте предложенные значения перед переименованием.",
             _ when locatedTitle => "Штамп найден, но графы не прочитаны. Заполните пустые графы вручную или выделите текст на листе.",
             _ => "Графы не распознаны. Выделите их на листе или введите данные."
@@ -326,14 +332,14 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
         RecognitionOptions options, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (!regions.Designation.IsValid || !regions.Name.IsValid)
-            throw new ArgumentException("Укажите обе графы.", nameof(regions));
+        if (!regions.Designation.IsValid || regions.Name != default && !regions.Name.IsValid)
+            throw new ArgumentException("Укажите графу «Обозначение». Наименование можно не выделять.", nameof(regions));
         using var input = File.OpenRead(path);
         using var document = OpenTextDocument(input, options.OcrEnabled);
         var ocr = new PpOcrReader(options.Languages);
         var sheet = document is null ? null : new PdfSheet(document.GetPage(page));
         var candidate = ReadText(sheet, page, regions, turn, false);
-        return HasBothFields(candidate) || !options.OcrEnabled ? candidate :
+        return candidate.Designation.Length > 0 && (!regions.Name.IsValid || candidate.Name.Length > 0) || !options.OcrEnabled ? candidate :
             CorrectAssemblySuffix(ReadOcr(path, candidate, ocr, token));
     }
 
