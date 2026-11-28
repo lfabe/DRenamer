@@ -669,10 +669,12 @@ public sealed partial class MainViewModel : ObservableObject
     private static bool IsPdf(string path) => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase);
 
     [RelayCommand]
-    private Task AnalyzeAsync() => AnalyzeRowsAsync(Rows.Where(r => r.Included).ToArray(), false, proposeMerges: SplitScanBatches);
+    private Task AnalyzeAsync() => AnalyzeRowsAsync(Rows.Where(r => r.Included).ToArray(), false,
+        proposeMerges: SplitScanBatches, prepareScans: AutoPrepareScans);
 
     public Task AnalyzeDocumentAsync(DocumentRow row) => Rows.Contains(row)
-        ? AnalyzeRowsAsync([row], true, proposeMerges: SplitScanBatches && row.InMergeProposal) : Task.CompletedTask;
+        ? AnalyzeRowsAsync([row], true, proposeMerges: SplitScanBatches && row.InMergeProposal,
+            prepareScans: AutoPrepareScans) : Task.CompletedTask;
 
     private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force, bool requireReview = false,
         bool proposeMerges = false, bool prepareScans = false)

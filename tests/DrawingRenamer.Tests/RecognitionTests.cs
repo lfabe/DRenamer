@@ -747,18 +747,99 @@ public sealed class RecognitionTests : IDisposable
         FormattableString transform = $"""
             q 1 0 0 1 297.5 421 cm
             q {Math.Cos(degrees * Math.PI / 180):0.000000} {Math.Sin(degrees * Math.PI / 180):0.000000} {-Math.Sin(degrees * Math.PI / 180):0.000000} {Math.Cos(degrees * Math.PI / 180):0.000000} 0 0 cm
-            1 w -249.5 -407 531 814 re S Q Q
+            1 w -240.81 -406.83 524.41 813.65 re S Q Q
             1 w 130 350 m 465 350 l S 310 170 m 310 660 l S
             """;
         return new Page(595, 842, rotation, FormattableString.Invariant(transform));
     }
 
     [Fact]
-    public void DeskewUsesTheStampWhenTheOuterFrameIsMissing()
+    public void DeskewDoesNotUseTheStampWhenTheMainFrameIsMissing()
     {
         using var input = File.OpenRead(Path.Combine(AppContext.BaseDirectory, "scan-skewed.pdf"));
+        Assert.Null(new PdfRenderer().FindPageAlignment(input, 1, null, default));
+    }
+
+    [Theory]
+    [InlineData(-2.5)]
+    [InlineData(2.5)]
+    public void DeskewIgnoresAStrongerOuterFrameAtAnotherAngle(double degrees)
+    {
+        var sheet = TiltedDrawingFrame(degrees);
+        var source = Pdf(sheet with { Content = sheet.Content + "\n3 w 1 1 593 840 re S" });
+        using var input = File.OpenRead(source);
         var alignment = Assert.IsType<PageAlignment>(new PdfRenderer().FindPageAlignment(input, 1, null, default));
-        Assert.InRange(alignment.Angle, 1.25, 1.55);
+        Assert.InRange(alignment.Angle, degrees - .15, degrees + .15);
+    }
+
+    [Fact]
+    public void DeskewRejectsAnOuterPaperOutlineWithoutTheMainFrame()
+    {
+        using var input = File.OpenRead(Pdf(new Page(595, 842, 0, "2 w 5 5 585 832 re S")));
+        Assert.Null(new PdfRenderer().FindPageAlignment(input, 1, null, default));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(3)]
+    public async Task RecognitionLevelsTheMainFrameBeforeReadingAndStagesCropAfterward(int turn)
+    {
+        var path = Path.Combine(folder, "tilted.pdf");
+        using (var input = File.OpenRead(Path.Combine(AppContext.BaseDirectory, "scan-framed-skewed.pdf")))
+        using (var output = File.Create(path))
+            PdfRenderer.SavePageEdits(input, output, new Dictionary<int, int> { [1] = turn }, null);
+        var hash = RenameService.Hash(path);
+        var analyzer = new DrawingAnalyzer();
+        var result = analyzer.Analyze(path, new(true, "rus") { DetectPageAlignment = true }, default);
+        var candidate = Assert.Single(result.Candidates);
+        Assert.InRange(result.PageAlignments![1].Angle, 2.3, 2.7);
+        Assert.Equal("АБВГ.123456.001", candidate.Designation);
+        Assert.Equal("Корпус основной", candidate.Name, ignoreCase: true);
+        Assert.True(candidate.Regions.Designation.IsValid && candidate.Regions.Name.IsValid);
+        Assert.True(candidate.Regions.TitleBlock?.IsValid);
+
+        using var renamer = new RenameService(Path.Combine(folder, "history.json"));
+        var model = new MainViewModel(Path.Combine(folder, "settings.json"))
+            { Renamer = renamer, AutoPrepareScans = true, Languages = "rus" };
+        var row = new DocumentRow(path);
+        model.Rows.Add(row);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        Assert.False(row.Confirmed);
+        Assert.InRange(row.PageAlignments[1].Angle, 2.3, 2.7);
+        Assert.Null(row.PageAlignments[1].Crop);
+        Assert.Single(row.PendingPageCrops);
+        await model.ConfirmAsync(row);
+        Assert.True(row.Confirmed);
+        Assert.NotNull(row.PageAlignments[1].Crop);
+        Assert.Empty(row.PendingPageCrops);
+        Assert.Equal(hash, RenameService.Hash(path));
+        var saved = Assert.Single(renamer.Execute([row.Request]));
+        Assert.Equal(MoveStatus.Moved, saved.Status);
+        using (var input = File.OpenRead(saved.Target!))
+            Assert.Equal(PageAlignment.Original, new PdfRenderer().FindPageAlignment(input, 1, null, default));
+        Assert.Equal(MoveStatus.Undone, Assert.Single(renamer.Undo()).Status);
+        Assert.Equal(hash, RenameService.Hash(path));
+    }
+
+    [Fact]
+    public async Task RecognitionKeepsAnUnframedStampForReviewWithoutPreparingCrop()
+    {
+        var path = Pdf(Sheet(595, 842, 0));
+        var result = new DrawingAnalyzer().Analyze(path, new(false) { DetectPageAlignment = true }, default);
+        Assert.Equal(RecognitionStatus.Review, result.Status);
+        Assert.Single(result.Candidates);
+        Assert.Empty(result.PageAlignments!);
+        Assert.Contains("Основная рамка", result.Diagnostic);
+
+        var model = new MainViewModel(Path.Combine(folder, "settings.json")) { AutoPrepareScans = true, OcrEnabled = false };
+        var row = new DocumentRow(path);
+        model.Rows.Add(row);
+        await model.AnalyzeCommand.ExecuteAsync(null);
+        Assert.Equal("Проверить", row.Status);
+        Assert.False(row.Confirmed);
+        Assert.Empty(row.PageAlignments);
+        Assert.Empty(row.PendingPageCrops);
     }
 
     [Theory]

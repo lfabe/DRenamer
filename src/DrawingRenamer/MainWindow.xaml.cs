@@ -818,19 +818,21 @@ public sealed partial class MainWindow : Window
         var pending = current?.PendingPageCrops.ContainsKey(page) == true;
         var applied = alignment.Angle != 0;
         var suggestions = current?.AvailableAlignments;
+        var frameKnown = suggestions?.ContainsKey(page) == true;
         var angle = suggestions?.GetValueOrDefault(page).Angle ?? 0;
         DeskewButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && !cropped && (applied || angle != 0);
         CropButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && cropSearch is null &&
-            (cropped || applied || angle == 0);
+            (cropped || pending || frameKnown && (applied || angle == 0));
         CropButton.Content = cropped ? "Отменить обрезку" : pending ? "Отменить предложение обрезки" : "Найти границу обрезки";
-        ToolTipService.SetToolTip(CropButton, angle != 0 && !applied && !cropped ? "Сначала выровняйте лист." : null);
+        ToolTipService.SetToolTip(CropButton, cropped || pending ? null : suggestions is null ? "Сначала нажмите «Распознать»."
+            : !frameKnown ? "Основная рамка не найдена." : angle != 0 && !applied ? "Сначала выровняйте лист." : null);
         if (cropped) RotateLeftButton.IsEnabled = RotateRightButton.IsEnabled = false;
         DeskewButton.IsChecked = applied;
         var label = applied ? "Отменить выравнивание листа" : "Выровнять лист";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DeskewButton, label);
         ToolTipService.SetToolTip(DeskewButton, applied ? label : angle != 0 ? $"Выровнять лист ({Math.Abs(angle):0.00}°)"
             : suggestions is null ? "Сначала нажмите «Распознать»."
-            : suggestions.ContainsKey(page) ? "Лист уже выровнен." : "По рамке и штампу не удалось определить угол.");
+            : frameKnown ? "Лист уже выровнен." : "Основная рамка не найдена.");
     }
 
     private void ToggleDeskew(object sender, RoutedEventArgs e)

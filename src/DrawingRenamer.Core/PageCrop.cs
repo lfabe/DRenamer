@@ -62,7 +62,8 @@ internal static class DrawingFrameCrop
         new("А4×6", 297, 1261), new("А4×7", 297, 1471), new("А4×8", 297, 1682), new("А4×9", 297, 1892)
     ];
 
-    internal static PageCrop? Find(Raster raster, double widthPt, double heightPt, int turns, Area? stamp, CancellationToken token)
+    internal static PageCrop? Find(Raster raster, double widthPt, double heightPt, int turns, Area? stamp, CancellationToken token,
+        bool checkContent = true)
     {
         var (w, h) = (raster.Width, raster.Height);
         if (Math.Min(w, h) < 160 || widthPt <= 0 || heightPt <= 0) return null;
@@ -72,7 +73,7 @@ internal static class DrawingFrameCrop
         var inkH = h / 3;
         var inkStride = inkW + 1;
         var ink = new int[inkStride * (inkH + 1)];
-        for (var y = 1; y <= inkH; y++)
+        for (var y = 1; checkContent && y <= inkH; y++)
         {
             token.ThrowIfCancellationRequested();
             var row = 0;
@@ -102,7 +103,7 @@ internal static class DrawingFrameCrop
             var mmY = frameH / (format.Height - 10d);
             var bounds = new Area((l.Position - 20 * mmX) / w, (t.Position - 5 * mmY) / h,
                 format.Width * mmX / w, format.Height * mmY / h);
-            if (CutsDrawing(bounds)) continue;
+            if (checkContent && CutsDrawing(bounds)) continue;
 
             // A parallel outer rule at the expected margin supports the inside rule, never the outer one.
             var outside = CountNear(left, l.Position - 20 * mmX, w) + CountNear(right, r.Position + 5 * mmX, w) +
@@ -116,7 +117,7 @@ internal static class DrawingFrameCrop
                 Corner(l.Position, b.Position) + Corner(r.Position, b.Position);
             var outerError = Math.Abs(Math.Log(format.Width / widthMm)) + Math.Abs(Math.Log(format.Height / heightMm));
             var innerError = Math.Abs(Math.Log((format.Width - 25d) / widthMm)) + Math.Abs(Math.Log((format.Height - 10d) / heightMm));
-            if (corners < 3 || (outside == 0 && !stampMatches &&
+            if (corners < 3 || (outside == 0 &&
                 (inside > 0 || outerError < innerError || bounds.X < -.007 || bounds.Y < -.007 ||
                 bounds.Right > 1.007 || bounds.Bottom > 1.007))) continue;
             var score = l.Score + r.Score + t.Score + b.Score + .7 * corners + 1.7 * (outside - inside) +
@@ -127,7 +128,7 @@ internal static class DrawingFrameCrop
             bestScore = score;
             best = new(format.Name, format.Width, format.Height, bounds, turns, false);
         }
-        return best is null ? null : best with { HasOutsideInk = ContainsOutsideInk(best.Bounds) };
+        return best is null ? null : best with { HasOutsideInk = checkContent && ContainsOutsideInk(best.Bounds) };
 
         static int CountNear(Rule[] rules, double position, int depth) =>
             rules.Any(rule => Math.Abs(rule.Position - position) < Math.Max(3, .003 * depth)) ? 1 : 0;

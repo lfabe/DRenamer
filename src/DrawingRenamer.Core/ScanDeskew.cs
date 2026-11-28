@@ -6,17 +6,34 @@ internal static class ScanDeskew
     private const int MaxStep = 120;
     private const double SlopeStep = .0005;
 
-    internal static double? FindFrameSlope(Raster raster, CancellationToken token)
+    internal static double? FindFrameSlope(Raster raster, double width, double height, CancellationToken token)
     {
         var horizontal = EdgeVotes(raster, vertical: false, token);
         var vertical = EdgeVotes(raster, vertical: true, token);
         var scores = horizontal.Zip(vertical, (h, v) =>
             h.Rules == 2 || h.Rules == 1 && v.Rules > 0 ? 2 * h.Score + v.Score : 0).ToArray();
-        var best = scores.Max();
-        if (best == 0) return null;
-        var nearBest = Enumerable.Range(0, scores.Length).Where(i => scores[i] >= best - 4).ToArray();
-        if (nearBest[^1] - nearBest[0] > 12) return null;
-        return (nearBest.Average() - MaxStep) * SlopeStep;
+        var tried = new List<int>();
+        foreach (var step in Enumerable.Range(0, scores.Length).Where(i => scores[i] > 0)
+            .OrderByDescending(i => scores[i]))
+        {
+            if (tried.Any(previous => Math.Abs(previous - step) <= 6)) continue;
+            tried.Add(step);
+            var from = Math.Max(0, step - 12);
+            var to = Math.Min(scores.Length - 1, step + 12);
+            var nearby = Enumerable.Range(from, to - from + 1)
+                .Where(i => scores[i] >= scores[step] - 4).ToArray();
+            if (nearby[^1] - nearby[0] > 12) continue;
+            var slope = (nearby.Average() - MaxStep) * SlopeStep;
+            var alignment = new PageAlignment(-Math.Atan(slope) * 180 / Math.PI, 1);
+            var leveled = PageCrop.Resample(raster, Area.Full, raster.Width, raster.Height, alignment, token);
+            for (var turn = 0; turn < 4; turn++)
+            {
+                var (w, h) = (turn & 1) == 0 ? (width, height) : (height, width);
+                if (DrawingFrameCrop.Find(leveled.Orient(turn), w, h, turn, null, token, checkContent: false) is not null)
+                    return slope;
+            }
+        }
+        return null;
     }
 
     private static (int Rules, int Score)[] EdgeVotes(Raster raster, bool vertical, CancellationToken token)

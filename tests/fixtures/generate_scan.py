@@ -30,6 +30,10 @@ def scan(output):
     draw.text((738, 2084), "основной", font=font, fill="black")
     image.save(output / "scan-form1.pdf", resolution=200)
     numbered = image.copy()
+    framed = image.copy()
+    ImageDraw.Draw(framed).rectangle((left, 40, right, bottom), outline="black", width=4)
+    framed.rotate(2.5, Image.Resampling.BICUBIC, expand=True, fillcolor="white").save(
+        output / "scan-framed-skewed.pdf", resolution=200)
     title = ImageDraw.Draw(numbered)
     title.line((1218, 2182, 1611, 2182), fill="black", width=4)
     title.line((1375, 2143, 1375, 2182), fill="black", width=4)
