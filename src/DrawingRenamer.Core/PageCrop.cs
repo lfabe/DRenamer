@@ -62,7 +62,8 @@ internal static class DrawingFrameCrop
         new("А4×6", 297, 1261), new("А4×7", 297, 1471), new("А4×8", 297, 1682), new("А4×9", 297, 1892)
     ];
 
-    internal static PageCrop? Find(Raster raster, double widthPt, double heightPt, int turns, Area? stamp, CancellationToken token)
+    internal static PageCrop? Find(Raster raster, double widthPt, double heightPt, int turns, Area? stamp, CancellationToken token,
+        bool checkContent = true)
     {
         var (w, h) = (raster.Width, raster.Height);
         if (Math.Min(w, h) < 160 || widthPt <= 0 || heightPt <= 0) return null;
@@ -72,7 +73,7 @@ internal static class DrawingFrameCrop
         var inkH = h / 3;
         var inkStride = inkW + 1;
         var ink = new int[inkStride * (inkH + 1)];
-        for (var y = 1; y <= inkH; y++)
+        for (var y = 1; checkContent && y <= inkH; y++)
         {
             token.ThrowIfCancellationRequested();
             var row = 0;
@@ -102,7 +103,7 @@ internal static class DrawingFrameCrop
             var mmY = frameH / (format.Height - 10d);
             var bounds = new Area((l.Position - 20 * mmX) / w, (t.Position - 5 * mmY) / h,
                 format.Width * mmX / w, format.Height * mmY / h);
-            if (CutsDrawing(bounds)) continue;
+            if (checkContent && CutsDrawing(bounds)) continue;
 
             // A parallel outer rule at the expected margin supports the inside rule, never the outer one.
             var outside = CountNear(left, l.Position - 20 * mmX, w) + CountNear(right, r.Position + 5 * mmX, w) +
@@ -112,11 +113,11 @@ internal static class DrawingFrameCrop
             var stampError = stamp is { IsValid: true } block
                 ? Math.Abs(block.Right - (double)r.Position / w) + Math.Abs(block.Bottom - (double)b.Position / h) : 0;
             var stampMatches = stamp is { IsValid: true } && stampError < .025;
-            var corners = Corner(l.Position, t.Position) + Corner(r.Position, t.Position) +
-                Corner(l.Position, b.Position) + Corner(r.Position, b.Position);
+            var corners = Corner(l.Position, t.Position, 1, 1) + Corner(r.Position, t.Position, -1, 1) +
+                Corner(l.Position, b.Position, 1, -1) + Corner(r.Position, b.Position, -1, -1);
             var outerError = Math.Abs(Math.Log(format.Width / widthMm)) + Math.Abs(Math.Log(format.Height / heightMm));
             var innerError = Math.Abs(Math.Log((format.Width - 25d) / widthMm)) + Math.Abs(Math.Log((format.Height - 10d) / heightMm));
-            if (corners < 3 || (outside == 0 && !stampMatches &&
+            if (corners < 3 || (outside == 0 &&
                 (inside > 0 || outerError < innerError || bounds.X < -.007 || bounds.Y < -.007 ||
                 bounds.Right > 1.007 || bounds.Bottom > 1.007))) continue;
             var score = l.Score + r.Score + t.Score + b.Score + .7 * corners + 1.7 * (outside - inside) +
@@ -127,7 +128,7 @@ internal static class DrawingFrameCrop
             bestScore = score;
             best = new(format.Name, format.Width, format.Height, bounds, turns, false);
         }
-        return best is null ? null : best with { HasOutsideInk = ContainsOutsideInk(best.Bounds) };
+        return best is null ? null : best with { HasOutsideInk = checkContent && ContainsOutsideInk(best.Bounds) };
 
         static int CountNear(Rule[] rules, double position, int depth) =>
             rules.Any(rule => Math.Abs(rule.Position - position) < Math.Max(3, .003 * depth)) ? 1 : 0;
@@ -143,12 +144,27 @@ internal static class DrawingFrameCrop
             return ink[^1] - inside > Math.Max(50, .03 * ink[^1]);
         }
 
-        int Corner(int x, int y)
+        int Corner(int x, int y, int dx, int dy)
         {
-            for (var dy = -4; dy <= 4; dy++)
-            for (var dx = -4; dx <= 4; dx++)
-                if (Light(x + dx, y + dy) < 620) return 1;
-            return 0;
+            return Branch(dx, 0) && Branch(0, dy) && !Branch(0, -dy) ? 1 : 0;
+
+            bool Branch(int alongX, int alongY)
+            {
+                var hits = 0;
+                var length = Math.Clamp(Math.Min(w, h) / 80, 10, 24);
+                for (var step = 0; step < 8; step++)
+                {
+                    var distance = 3 + step * length / 7;
+                    for (var across = -3; across <= 3; across++)
+                        if (Light(x + alongX * distance - alongY * across,
+                            y + alongY * distance + alongX * across) < 620)
+                        {
+                            hits++;
+                            break;
+                        }
+                }
+                return hits >= 6;
+            }
         }
 
         (Rule[], Rule[]) FindRules(bool vertical)
@@ -176,10 +192,10 @@ internal static class DrawingFrameCrop
                 if (hits >= 63)
                     (p < depth / 2 ? first : last).Add(new(p, hits / 100d + strength / 40000d));
             }
-            return (Distinct(first), Distinct(last));
+            return (Distinct(first, true), Distinct(last, false));
 
             int At(int p, int along) => vertical ? Light(p, along) : Light(along, p);
-            static Rule[] Distinct(List<Rule> rules)
+            static Rule[] Distinct(List<Rule> rules, bool fromStart)
             {
                 var best = new List<Rule>();
                 foreach (var rule in rules.OrderByDescending(r => r.Score))
@@ -188,14 +204,16 @@ internal static class DrawingFrameCrop
                     var center = rules.Where(candidate => Math.Abs(candidate.Position - rule.Position) <= 3 &&
                         candidate.Score >= rule.Score - .025).Average(candidate => candidate.Position);
                     best.Add(rule with { Position = (int)Math.Round(center) });
-                    if (best.Count == 8) break;
                 }
-                return best.ToArray();
+                // Table rows must not displace faint frame rules nearest the paper edges.
+                var outside = fromStart ? best.OrderBy(rule => rule.Position) : best.OrderByDescending(rule => rule.Position);
+                return best.Take(8).Concat(outside.Take(8)).Distinct().ToArray();
             }
         }
 
         int Light(int x, int y)
         {
+            if ((uint)x >= (uint)w || (uint)y >= (uint)h) return 765;
             var p = 4 * (x + y * w);
             return raster.Pixels[p] + raster.Pixels[p + 1] + raster.Pixels[p + 2];
         }

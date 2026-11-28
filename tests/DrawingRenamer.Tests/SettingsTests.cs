@@ -16,6 +16,7 @@ public sealed class SettingsTests : IDisposable
         first.ScannerWatchEnabled = true;
         first.ScannerCreatedAfter = DateTimeOffset.Now.AddHours(-3);
         first.SplitScanBatches = true;
+        first.AutoPrepareScans = true;
         await first.SaveSettingsAsync();
         Assert.True(File.Exists(SettingsFile));
 
@@ -31,6 +32,7 @@ public sealed class SettingsTests : IDisposable
         Assert.True(restored.ScannerWatchEnabled);
         Assert.Equal(first.ScannerCreatedAfter, restored.ScannerCreatedAfter);
         Assert.True(restored.SplitScanBatches);
+        Assert.True(restored.AutoPrepareScans);
         Assert.Contains("Saved template", (await restored.LoadRecognitionOptionsAsync()).Templates!.Select(t => t.Name));
     }
 
@@ -68,6 +70,7 @@ public sealed class SettingsTests : IDisposable
         model.SetTemplates(templatePath);
         model.SetScannerFolder(folder);
         model.ScannerWatchEnabled = true;
+        model.AutoPrepareScans = true;
         await model.SaveSettingsAsync();
         model.SeparatorInput = "_уу";
         await model.ResetSettingsAsync();
@@ -138,6 +141,7 @@ public sealed class SettingsTests : IDisposable
 
     private static void AssertDefaults(MainViewModel model)
     {
+        Assert.False(model.AutoPrepareScans);
         Assert.Equal(0, model.ThemeIndex);
         Assert.Equal("_", model.SeparatorInput);
         Assert.Null(model.SeparatorError);

@@ -128,14 +128,19 @@ public sealed class PdfRenderer
     public Raster Render(string path, int number, Area crop, int maxEdge, CancellationToken token) =>
         Render(path, number, crop, maxEdge, token, 0);
 
-    internal Raster Render(string path, int number, Area crop, int maxEdge, CancellationToken token, int turn)
+    internal Raster Render(string path, int number, Area crop, int maxEdge, CancellationToken token, int turn,
+        PageAlignment? alignment = null)
     {
         if (!crop.IsValid || number < 1 || maxEdge is < 32 or > 4096)
             throw new ArgumentOutOfRangeException(nameof(crop));
         token.ThrowIfCancellationRequested();
         // Open with a managed stream so filenames use Windows Unicode path handling.
         using var input = File.OpenRead(path);
-        return WithDocument(input, document => RenderPage(document, number, crop, maxEdge, token, turn), token);
+        return WithDocument(input, document =>
+        {
+            if (alignment is { } edit && edit != PageAlignment.Original) AlignPage(document, number, edit, 0);
+            return RenderPage(document, number, crop, maxEdge, token, turn);
+        }, token);
     }
 
     public PageAlignment? FindPageAlignment(Stream input, int number, IReadOnlyList<TitleTemplate>? templates, CancellationToken token)
@@ -148,15 +153,8 @@ public sealed class PdfRenderer
     internal static PageAlignment? FindPageAlignment(Raster raster, double width, double height,
         IReadOnlyList<TitleTemplate>? templates, CancellationToken token)
     {
-        var slope = ScanDeskew.FindFrameSlope(raster, token);
-        if (slope is null)
-        {
-            var stampSlopes = ScanTitleLocator.Find(raster, width, height, templates ?? TitleTemplate.Defaults,
-                turn => raster.Orient(turn), token).Select(stamp => stamp.Slope).Distinct().ToArray();
-            if (stampSlopes.Length == 0 || stampSlopes.Max() - stampSlopes.Min() > .006) return null;
-            slope = stampSlopes.Average();
-        }
-        return PageAlignment.ForScan(raster, -Math.Atan(slope.Value) * 180 / Math.PI, token);
+        var slope = ScanDeskew.FindFrameSlope(raster, width, height, token);
+        return slope is { } found ? PageAlignment.ForScan(raster, -Math.Atan(found) * 180 / Math.PI, token) : null;
     }
 
     public PageCrop? FindPageCrop(Stream input, int number, int turns, PageAlignment alignment, Area? stamp, CancellationToken token)

@@ -61,6 +61,7 @@ public sealed partial class DocumentRow : ObservableObject
     public IReadOnlyList<Candidate> Candidates => Result?.Candidates ?? [];
     public Dictionary<int, int> PageRotations { get; } = [];
     internal Dictionary<int, PageAlignment> PageAlignments { get; } = [];
+    internal Dictionary<int, PageCrop> PendingPageCrops { get; } = [];
     internal IReadOnlyDictionary<int, PageAlignment>? AvailableAlignments { get; private set; }
     internal void SetAvailableAlignments(IReadOnlyDictionary<int, PageAlignment>? alignments)
     {
@@ -72,8 +73,10 @@ public sealed partial class DocumentRow : ObservableObject
     {
         Separator = Separator,
         ExpectedHash = SourceHash ?? throw new InvalidOperationException("Сначала подтвердите версию PDF."),
-        PageRotations = PageRotations.Count == 0 ? null : new Dictionary<int, int>(PageRotations),
-        PageAlignments = PageAlignments.Count == 0 ? null : new Dictionary<int, PageAlignment>(PageAlignments)
+        PageRotations = PageRotations.Any(edit => edit.Value != 0)
+            ? PageRotations.Where(edit => edit.Value != 0).ToDictionary() : null,
+        PageAlignments = PageAlignments.Any(edit => edit.Value != PageAlignment.Original)
+            ? PageAlignments.Where(edit => edit.Value != PageAlignment.Original).ToDictionary() : null
     };
     public string? NameError
     {
@@ -94,6 +97,7 @@ public sealed partial class DocumentRow : ObservableObject
         {
             PageRotations.Clear();
             PageAlignments.Clear();
+            PendingPageCrops.Clear();
         }
         MergeEligible = false;
         SheetNumberText = "";
@@ -124,6 +128,8 @@ public sealed partial class DocumentRow : ObservableObject
 
     public void Use(Candidate candidate)
     {
+        if (candidate.Turn != PageRotations.GetValueOrDefault(candidate.Page))
+            PendingPageCrops.Remove(candidate.Page);
         if (candidate.SheetNumber is { } number) SheetNumberText = number.ToString();
         SelectedCandidate = candidate;
         if (candidate.Turn == 0) PageRotations.Remove(candidate.Page);
@@ -151,6 +157,7 @@ public sealed partial class DocumentRow : ObservableObject
         SourceHash = hash;
         if (rotations is not null) PageRotations.Clear();
         if (alignments is not null) PageAlignments.Clear();
+        PendingPageCrops.Clear();
         SetAvailableAlignments(null);
         if (Result is { } result) Result = result with { SourceHash = hash, PageAlignments = null,
             Candidates = result.Candidates.Where(candidate => alignments?.ContainsKey(candidate.Page) != true).Select(Rotate).ToArray() };
@@ -192,18 +199,34 @@ public sealed partial class DocumentRow : ObservableObject
     public void InvalidateVersion(string? hash = null) =>
         Apply(new(RecognitionStatus.Review, 0, [], "PDF изменился. Проверьте графы заново.") { SourceHash = hash });
 
-    public bool Confirm(string hash)
+    public bool Confirm(string hash) => Confirm(hash, null);
+
+    internal bool Confirm(string hash, DocumentRow? namedSheet)
     {
         if (!ObserveVersion(hash)) return false;
-        var error = NameError;
+        var name = InMergeProposal && !HasDocumentName && SelectedCandidate?.Regions.Name.IsValid == false
+            ? namedSheet?.NameForRename ?? NameForRename : NameForRename;
+        RenameService.FileName(Designation, name, Separator, out var error);
         Confirmed = error is null;
         Status = Confirmed ? "Подтверждено" : "Проверить";
         Diagnostic = error ?? "Значения проверены.";
+        if (Confirmed && PendingPageCrops.Count > 0)
+        {
+            foreach (var (page, crop) in PendingPageCrops)
+                PageAlignments[page] = PageAlignments.GetValueOrDefault(page, PageAlignment.Original) with { Crop = crop };
+            PendingPageCrops.Clear();
+            RefreshSavedPreview();
+        }
         return Confirmed;
     }
 
     partial void OnDesignationChanged(string value) => Edited();
     partial void OnDocumentNameChanged(string value) => Edited();
+
+    partial void OnInMergeProposalChanged(bool value)
+    {
+        if (!value && Confirmed && NameError is not null) Edited();
+    }
 
     partial void OnSeparatorChanged(string value)
     {

@@ -100,15 +100,15 @@ internal sealed record LocatedTitle(TitleTemplate Template, Area Frame, int Turn
     public bool IsContinuation => !Template.Title.IsValid;
     public Area PageFrame => Frame.Rotate(-Turn);
     public FieldRegions Regions => new(Template.Designation.Inside(Frame).Rotate(-Turn),
-        Template.Title.Inside(Frame).Rotate(-Turn), PageFrame);
+        Template.Title.IsValid ? Template.Title.Inside(Frame).Rotate(-Turn) : default, PageFrame);
 }
 
 internal static class TitleLocator
 {
     // Forms 2а and 2б have designation (2), but no title (1).
-    private static readonly TitleTemplate RightContinuation = new("ЕСКД, форма 2а/2б", 185, 15,
+    internal static readonly TitleTemplate RightContinuation = new("ЕСКД, форма 2а/2б", 185, 15,
         new(65d / 185, 0, 100d / 185, 1), default, []);
-    private static readonly TitleTemplate LeftContinuation = RightContinuation with
+    internal static readonly TitleTemplate LeftContinuation = RightContinuation with
     {
         Designation = new(10d / 185, 0, 100d / 185, 1)
     };

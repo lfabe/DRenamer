@@ -67,13 +67,17 @@
                                     <ToggleSwitch Header="Автораспознавание сканов" OnContent="Включено" OffContent="Выключено"
                                                   IsOn="{x:Bind ViewModel.ScannerWatchEnabled, Mode=TwoWay}"
                                                   IsEnabled="{x:Bind ViewModel.HasScannerFolder, Mode=OneWay}"
-                                                  ToolTipService.ToolTip="При разбиении пачек сканы добавляются в очередь для ручного запуска распознавания."/>
+                                                  ToolTipService.ToolTip="При включённой автоподготовке распознавание запускается и для разделённых пачек."/>
                                     <CalendarDatePicker x:Name="ScannerStartDatePicker" Header="Принимать файлы, созданные с"
                                                         DateChanged="ScannerStartDateChanged"/>
                                     <TimePicker x:Name="ScannerStartTimePicker" Header="Время" ClockIdentifier="24HourClock"
                                                 TimeChanged="ScannerStartTimeChanged"/>
                                     <ToggleSwitch Header="Разбивать пачки PDF" OnContent="Включено" OffContent="Выключено"
                                                   IsOn="{x:Bind ViewModel.SplitScanBatches, Mode=TwoWay}"/>
+                                    <ToggleSwitch Header="Выравнивать и обрезать сканы" OnContent="Включено" OffContent="Выключено"
+                                                  IsOn="{x:Bind ViewModel.AutoPrepareScans, Mode=TwoWay}"/>
+                                    <TextBlock Text="Проверьте контур обрезки в просмотре и подтвердите значения. Сохраните правки переименованием или объединением."
+                                               TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}"/>
                                 </StackPanel>
                                 <TextBlock Text="{x:Bind ViewModel.TemplateLabel, Mode=OneWay}" TextWrapping="Wrap"/>
                                 <StackPanel Orientation="Horizontal" Spacing="8">
@@ -338,6 +342,7 @@
                                                    AutomationProperties.Name="Изображение листа PDF"/>
                                             <Canvas x:Name="Overlays" IsHitTestVisible="False"/>
                                         </Canvas>
+                                        <Canvas x:Name="CropOverlays" IsHitTestVisible="False"/>
                                     </Canvas>
                                 </Canvas>
                             </ScrollViewer>

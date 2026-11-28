@@ -44,6 +44,7 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
         var incomplete = new List<Candidate>();
         var sheetLayouts = new List<LocatedTitle>();
         var pageAlignments = options.DetectPageAlignment ? new Dictionary<int, PageAlignment>() : null;
+        var recognitionViews = new Dictionary<int, (PageAlignment Alignment, double Width, double Height)>();
         var pages = 0;
         var failed = 0;
         var locatedTitle = false;
@@ -68,24 +69,34 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
                     var page = document?.GetPage(number);
                     var sheet = page is null ? null : new PdfSheet(page);
                     var (width, height) = page is null ? renderer.PageSize(input, number, token) : (page.Width, page.Height);
-                    var found = Find(sheet?.Lines(token) ?? [], width, height, templates, token).ToList();
                     Raster? scan = null;
                     Raster? raster = null;
-                    if (pageAlignments is not null && alreadyAligned?.Contains(number) == true)
-                        pageAlignments[number] = PageAlignment.Original;
-                    else if (pageAlignments is not null)
+                    var recognitionAlignment = PageAlignment.Original;
+                    var isScan = page is null || page.NumberOfImages > 0;
+                    if (pageAlignments is not null || options.OcrEnabled && isScan)
                     {
                         try
                         {
                             raster = renderer.Render(path, number, Area.Full, 2300, token);
                             if (PdfRenderer.FindPageAlignment(raster, width, height, templates, token) is { } alignment)
-                                pageAlignments[number] = alignment;
+                            {
+                                if (alreadyAligned?.Contains(number) == true) alignment = PageAlignment.Original;
+                                pageAlignments?.Add(number, alignment);
+                                if (options.OcrEnabled && isScan && alignment != PageAlignment.Original)
+                                {
+                                    recognitionAlignment = alignment;
+                                    recognitionViews[number] = (alignment, width, height);
+                                    raster = renderer.Render(path, number, Area.Full, 2300, token, 0, alignment);
+                                    sheet = null;
+                                }
+                            }
                         }
                         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
                         {
                             log?.Warning("Recognition", $"Alignment detection failed. Source={path}; Page={number}", ex);
                         }
                     }
+                    var found = Find(sheet?.Lines(token) ?? [], width, height, templates, token).ToList();
                     ScanTitle[]? fittedScans = null;
                     if (found.Count == 0 && options.OcrEnabled)
                     {
@@ -101,7 +112,7 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
                         var candidate = ReadText(sheet, number, continuation.Regions, continuation.Turn, false)
                             with { Template = continuation.Template };
                         if (candidate.Designation.Length == 0 && options.OcrEnabled)
-                            candidate = ReadOcr(path, candidate, ocr, token);
+                            candidate = ReadOcr(path, candidate, ocr, token, alignment: recognitionAlignment);
                         if (candidate.Designation.Length > 0 && (candidate.OcrConfidence is null or >= .35))
                             continuations.Add(candidate);
                         continue;
@@ -139,17 +150,17 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
 
                         if (!HasBothFields(candidate) && options.OcrEnabled)
                         {
-                            var recognized = ReadOcr(path, candidate, ocr, token);
+                            var recognized = ReadOcr(path, candidate, ocr, token, alignment: recognitionAlignment);
                             if (scan is not null && candidate.Name.Length == 0 && recognized.OcrConfidence < .92)
                             {
                                 fittedScans ??= ScanTitleLocator.Find(scan, width, height, templates,
-                                    turn => renderer.Render(path, number, Area.Full, 2300, token, turn), token).ToArray();
+                                    turn => renderer.Render(path, number, Area.Full, 2300, token, turn, recognitionAlignment), token).ToArray();
                                 var fitted = fittedScans.FirstOrDefault(s => s.Turn == location.Turn && s.Template == location.Template &&
                                     s.Regions.TitleBlock is { } block && TitleLocator.SameFrame(block, location.PageFrame));
                                 if (fitted is not null)
                                 {
                                     var retry = ReadOcr(path, recognized with { Name = "",
-                                        Regions = fitted.Regions with { Designation = recognized.Regions.Designation } }, ocr, token, fitted);
+                                        Regions = fitted.Regions with { Designation = recognized.Regions.Designation } }, ocr, token, fitted, recognitionAlignment);
                                     if (retry.NameOcrScore > recognized.NameOcrScore && RenameService.FileName("А", retry.Name) is not null)
                                         recognized = retry;
                                 }
@@ -167,7 +178,7 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
                     {
                         var fittedMatches = new List<Candidate>();
                         foreach (var stamp in (fittedScans ?? ScanTitleLocator.Find(scan, width, height, templates,
-                            turn => renderer.Render(path, number, Area.Full, 2300, token, turn), token))
+                            turn => renderer.Render(path, number, Area.Full, 2300, token, turn, recognitionAlignment), token))
                             .DistinctBy(s => (s.Regions, s.Turn, s.Slope)))
                         {
                             if (options.ReadSheetNumber && pages == 1 && stamp.Regions.TitleBlock is { } bounds)
@@ -175,7 +186,13 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
                             var candidate = ReadText(sheet, number, stamp.Regions, stamp.Turn, false)
                                 with { Template = stamp.Template };
                             locatedTitle = true;
-                            if (!HasBothFields(candidate)) candidate = ReadOcr(path, candidate, ocr, token, stamp);
+                            if (!HasBothFields(candidate)) candidate = ReadOcr(path, candidate, ocr, token, stamp, recognitionAlignment);
+                            if (!stamp.Template.Title.IsValid)
+                            {
+                                if (candidate.Designation.Length > 0 && candidate.OcrConfidence is not < .35)
+                                    continuations.Add(candidate);
+                                continue;
+                            }
                             // Preserve separators already read from this same stamp; never invent missing digits or dots.
                             var sameStamp = matches.Where(c => c.Page == number && c.Turn == candidate.Turn &&
                                 c.Regions.TitleBlock is { } previous && stamp.Regions.TitleBlock is { } fitted &&
@@ -249,9 +266,10 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
                 {
                     input.Position = 0;
                     using var document = OpenTextDocument(input, options.OcrEnabled);
-                    var sheet = document is null ? null : new PdfSheet(document.GetPage(1));
+                    var alignment = recognitionViews.TryGetValue(1, out var view) ? view.Alignment : PageAlignment.Original;
+                    var sheet = document is null || alignment != PageAlignment.Original ? null : new PdfSheet(document.GetPage(1));
                     for (var i = 0; i < pairs.Length; i++)
-                        pairs[i] = pairs[i] with { SheetNumber = ReadSheetNumber(path, pairs[i], sheetLayouts, sheet, options.OcrEnabled, ocr, token) };
+                        pairs[i] = pairs[i] with { SheetNumber = ReadSheetNumber(path, pairs[i], sheetLayouts, sheet, options.OcrEnabled, ocr, token, alignment) };
                 }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or PdfDocumentFormatException)
@@ -271,17 +289,28 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
             RecognitionStatus.Ready => "Графы подтверждены геометрией штампа.",
             _ when failed > 0 => $"Страниц с ошибкой: {failed} из {pages}. {failure}",
             _ when pairs.Length > 1 => "Найдено несколько пар. Выберите правильный вариант.",
-            _ when continuationOnly => "Найден штамп последующего листа. Введите наименование вручную.",
+            _ when continuationOnly => "Найден штамп последующего листа. На этом листе есть только обозначение.",
             RecognitionStatus.Review => "Проверьте предложенные значения перед переименованием.",
             _ when locatedTitle => "Штамп найден, но графы не прочитаны. Заполните пустые графы вручную или выделите текст на листе.",
             _ => "Графы не распознаны. Выделите их на листе или введите данные."
         };
+        if (pageAlignments is not null && pageAlignments.Count < pages)
+            diagnostic += " Основная рамка найдена не на всех листах. Автовыравнивание и обрезка этих листов недоступны.";
+        pairs = pairs.Select(candidate =>
+        {
+            if (!recognitionViews.TryGetValue(candidate.Page, out var view)) return candidate;
+            var inverse = new PageAlignment(-view.Alignment.Angle, 1 / view.Alignment.Scale);
+            Area Map(Area area) => area.IsValid ? inverse.Bounds(area, view.Width, view.Height) : default;
+            var regions = candidate.Regions;
+            return candidate with { Regions = new(Map(regions.Designation), Map(regions.Name),
+                regions.TitleBlock is { } block ? Map(block) : null) };
+        }).ToArray();
         log?.Info("Recognition", $"Completed. Source={path}; Status={status}; Pages={pages}; FailedPages={failed}; Candidates={pairs.Length}; ElapsedMs={clock.ElapsedMilliseconds}; {diagnostic}");
         return new(status, pages, pairs, diagnostic) { SourceHash = sourceHash, PageAlignments = pageAlignments };
     }
 
     private int? ReadSheetNumber(string path, Candidate candidate, IReadOnlyList<LocatedTitle> layouts,
-        PdfSheet? sheet, bool useOcr, PpOcrReader ocr, CancellationToken token)
+        PdfSheet? sheet, bool useOcr, PpOcrReader ocr, CancellationToken token, PageAlignment alignment)
     {
         if (candidate.Regions.TitleBlock is not { } frame) return null;
         var template = candidate.Template;
@@ -306,7 +335,7 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
         var number = sheet is null ? null : Parse(sheet.Read(area, candidate.Turn));
         if (number is not null || !useOcr) return number;
         var uprightFrame = frame.Rotate(candidate.Turn);
-        var stamp = renderer.Render(path, candidate.Page, uprightFrame, 2200, token, candidate.Turn);
+        var stamp = renderer.Render(path, candidate.Page, uprightFrame, 2200, token, candidate.Turn, alignment);
         var raster = stamp.ReadScanField(area.Rotate(candidate.Turn).Inset(.08), uprightFrame, 0, filterAnnotations: false);
         var reading = ocr.Read(raster, 0, token, preferEnglish: true, singleLine: true);
         return reading.Confidence >= .65 ? Parse(reading.Text) : null;
@@ -326,14 +355,14 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
         RecognitionOptions options, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (!regions.Designation.IsValid || !regions.Name.IsValid)
-            throw new ArgumentException("Укажите обе графы.", nameof(regions));
+        if (!regions.Designation.IsValid || regions.Name != default && !regions.Name.IsValid)
+            throw new ArgumentException("Укажите графу «Обозначение». Наименование можно не выделять.", nameof(regions));
         using var input = File.OpenRead(path);
         using var document = OpenTextDocument(input, options.OcrEnabled);
         var ocr = new PpOcrReader(options.Languages);
         var sheet = document is null ? null : new PdfSheet(document.GetPage(page));
         var candidate = ReadText(sheet, page, regions, turn, false);
-        return HasBothFields(candidate) || !options.OcrEnabled ? candidate :
+        return candidate.Designation.Length > 0 && (!regions.Name.IsValid || candidate.Name.Length > 0) || !options.OcrEnabled ? candidate :
             CorrectAssemblySuffix(ReadOcr(path, candidate, ocr, token));
     }
 
@@ -401,14 +430,15 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
         return new(designation, name, page, turn, regions, "PDF", Verified: verified);
     }
 
-    private Candidate ReadOcr(string path, Candidate candidate, PpOcrReader ocr, CancellationToken token, ScanTitle? scan = null)
+    private Candidate ReadOcr(string path, Candidate candidate, PpOcrReader ocr, CancellationToken token, ScanTitle? scan = null,
+        PageAlignment? alignment = null)
     {
         var designation = candidate.Designation;
         var name = candidate.Name;
         var nameScore = 0d;
         // Rendering just a narrow cell can make PDFium decode a large JPEG at thumbnail resolution.
         var frame = candidate.Regions.TitleBlock.GetValueOrDefault().Rotate(candidate.Turn);
-        var stamp = scan is not null ? renderer.Render(path, candidate.Page, frame, 2200, token, scan.Turn) : null;
+        var stamp = scan is not null ? renderer.Render(path, candidate.Page, frame, 2200, token, scan.Turn, alignment) : null;
         var confidence = 1d;
         var designationScore = 0d;
         var englishFirst = false;
@@ -428,7 +458,7 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
             if (scan is not null && NeedsNameRetry(result))
             {
                 var direct = ocr.Read(renderer.Render(path, candidate.Page, candidate.Regions.Name.Rotate(scan.Turn).Inset(.017),
-                    1450, token, scan.Turn), 0, token, preferEnglish: englishFirst);
+                    1450, token, scan.Turn, alignment), 0, token, preferEnglish: englishFirst);
                 if (direct.Score > result.Score) result = direct;
             }
             if (scan?.NameLines.Count is >= 1 and <= 8 && NeedsNameRetry(result))
@@ -480,11 +510,11 @@ public sealed class DrawingAnalyzer(DiagnosticLog? log = null)
                     return ocr.Read(raster, 0, token, preferEnglish, isDesignation, singleLine);
                 }
             }
-            var direct = ocr.Read(renderer.Render(path, candidate.Page, region.Inset(.017), 1450, token),
+            var direct = ocr.Read(renderer.Render(path, candidate.Page, region.Inset(.017), 1450, token, 0, alignment),
                 candidate.Turn, token, preferEnglish, isDesignation, singleLine);
             if (!isDesignation && direct.Text.Count(char.IsLetter) >= 3 && NeedsNameRetry(direct))
             {
-                var inset = ocr.Read(renderer.Render(path, candidate.Page, region.Inset(.06), 900, token),
+                var inset = ocr.Read(renderer.Render(path, candidate.Page, region.Inset(.06), 900, token, 0, alignment),
                     candidate.Turn, token, preferEnglish);
                 if (inset.Score > direct.Score) direct = inset;
             }

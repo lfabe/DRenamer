@@ -72,7 +72,7 @@ public sealed partial class MainWindow : Window
         PreviewScroll.ViewChanged += (_, _) =>
         {
             var thickness = RegionStrokeThickness;
-            foreach (var outline in Overlays.Children.OfType<Rectangle>())
+            foreach (var outline in Overlays.Children.Concat(CropOverlays.Children).OfType<Rectangle>())
                 outline.StrokeThickness = thickness;
         };
         Root.AddHandler(UIElement.DragOverEvent, new DragEventHandler(DocumentsDragOver), true);
@@ -190,7 +190,8 @@ public sealed partial class MainWindow : Window
         UpdateDeskewButton();
         ToggleRegionsButton.IsEnabled = StartManualRegionsButton.IsEnabled = available;
         MarkDesignationButton.IsEnabled = MarkNameButton.IsEnabled = MarkStampButton.IsEnabled = available;
-        ReadRegionsButton.IsEnabled = SaveRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
+        ReadRegionsButton.IsEnabled = available && designation.HasValue;
+        SaveRegionsButton.IsEnabled = available && designation.HasValue && name.HasValue;
         EmptyQueue.Visibility = ViewModel.Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -730,6 +731,7 @@ public sealed partial class MainWindow : Window
         SheetExtent.Width = SheetExtent.Height = 0;
         UpdateCommands();
         Overlays.Children.Clear();
+        CropOverlays.Children.Clear();
         PreviousButton.IsEnabled = NextButton.IsEnabled = false;
         PageLabel.Text = "—";
         PreviewMessage.Visibility = Visibility.Visible;
@@ -775,7 +777,7 @@ public sealed partial class MainWindow : Window
             if (row.SelectedCandidate is { } candidate && candidate.Page == page)
             {
                 Orientation.SelectedIndex = (candidate.Turn - PreviewTurn) & 3;
-                if (row.Status == "Проверить") frame = candidate.Regions.TitleBlock;
+                if (row.Status == "Проверить" && !row.PendingPageCrops.ContainsKey(page)) frame = candidate.Regions.TitleBlock;
             }
             else Orientation.SelectedIndex = 0;
             FitSheet(frame);
@@ -813,21 +815,24 @@ public sealed partial class MainWindow : Window
     {
         var alignment = Alignment;
         var cropped = alignment.Crop is not null;
+        var pending = current?.PendingPageCrops.ContainsKey(page) == true;
         var applied = alignment.Angle != 0;
         var suggestions = current?.AvailableAlignments;
+        var frameKnown = suggestions?.ContainsKey(page) == true;
         var angle = suggestions?.GetValueOrDefault(page).Angle ?? 0;
         DeskewButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && !cropped && (applied || angle != 0);
         CropButton.IsEnabled = CanChangeDocuments && PageImage.Source is not null && cropSearch is null &&
-            (cropped || applied || angle == 0);
-        CropButton.Content = cropped ? "Отменить обрезку" : "Обрезать по основной рамке";
-        ToolTipService.SetToolTip(CropButton, angle != 0 && !applied && !cropped ? "Сначала выровняйте лист." : null);
+            (cropped || pending || frameKnown && (applied || angle == 0));
+        CropButton.Content = cropped ? "Отменить обрезку" : pending ? "Отменить предложение обрезки" : "Найти границу обрезки";
+        ToolTipService.SetToolTip(CropButton, cropped || pending ? null : suggestions is null ? "Сначала нажмите «Распознать»."
+            : !frameKnown ? "Основная рамка не найдена." : angle != 0 && !applied ? "Сначала выровняйте лист." : null);
         if (cropped) RotateLeftButton.IsEnabled = RotateRightButton.IsEnabled = false;
         DeskewButton.IsChecked = applied;
         var label = applied ? "Отменить выравнивание листа" : "Выровнять лист";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DeskewButton, label);
         ToolTipService.SetToolTip(DeskewButton, applied ? label : angle != 0 ? $"Выровнять лист ({Math.Abs(angle):0.00}°)"
             : suggestions is null ? "Сначала нажмите «Распознать»."
-            : suggestions.ContainsKey(page) ? "Лист уже выровнен." : "По рамке и штампу не удалось определить угол.");
+            : frameKnown ? "Лист уже выровнен." : "Основная рамка не найдена.");
     }
 
     private void ToggleDeskew(object sender, RoutedEventArgs e)
@@ -838,6 +843,7 @@ public sealed partial class MainWindow : Window
             UpdateDeskewButton();
             return;
         }
+        row.PendingPageCrops.Remove(page);
         if (row.PageAlignments.Remove(page))
         {
             UpdateSheetTransforms();
@@ -864,6 +870,13 @@ public sealed partial class MainWindow : Window
         if (current is not { SourceHash: { } hash } row || !CropButton.IsEnabled || dragStart.HasValue) return;
         var alignment = Alignment;
         var number = page;
+        if (row.PendingPageCrops.Remove(number))
+        {
+            PaintRegions();
+            UpdateDeskewButton();
+            ViewModel.Message = "Предложение обрезки отменено.";
+            return;
+        }
         if (alignment.Crop is not null)
         {
             if (alignment.Angle == 0) row.PageAlignments.Remove(number);
@@ -894,10 +907,13 @@ public sealed partial class MainWindow : Window
                 ViewModel.Message = "Не удалось уверенно найти основную рамку и подобрать формат. Проверьте ориентацию и перекос листа.";
                 return;
             }
-            row.PageAlignments[number] = alignment with { Crop = crop };
-            await SelectPageAsync(number);
+            row.PendingPageCrops[number] = crop;
+            row.Confirmed = false;
+            row.Status = "Проверить";
+            row.Diagnostic = "Проверьте контур обрезки и подтвердите значения.";
+            FitSheet();
             var warning = crop.HasOutsideInk ? " · За границей есть видимые отметки. Проверьте результат." : "";
-            ViewModel.Message = $"Обрезка {crop.Format} · {crop.WidthMm} × {crop.HeightMm} мм · Поля 20/5/5/5 мм{warning}";
+            ViewModel.Message = $"Предложение обрезки {crop.Format} · {crop.WidthMm} × {crop.HeightMm} мм · Поля 20/5/5/5 мм{warning} · Нажмите «Подтвердить».";
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
@@ -926,6 +942,7 @@ public sealed partial class MainWindow : Window
     {
         if (current is not { } row || PageImage.Source is null || dragStart.HasValue || Alignment.Crop is not null) return;
         var turns = (PreviewTurn + degrees / 90 + 4) & 3;
+        row.PendingPageCrops.Remove(page);
         if (turns == 0) row.PageRotations.Remove(page);
         else row.PageRotations[page] = turns;
         UpdateSheetTransforms();
@@ -948,7 +965,12 @@ public sealed partial class MainWindow : Window
         Root.UpdateLayout();
         var (width, height) = sheetSize;
         var turn = Alignment.Crop is null ? PreviewTurn : 0;
-        var (extentWidth, extentHeight) = (turn & 1) == 0 ? (width, height) : (height, width);
+        var bounds = current?.PendingPageCrops.GetValueOrDefault(page)?.Bounds.Rotate((4 - turn) & 3) ?? Area.Full;
+        var paddingX = Math.Max(0, Math.Max(-bounds.X, bounds.Right - 1));
+        var paddingY = Math.Max(0, Math.Max(-bounds.Y, bounds.Bottom - 1));
+        var paddedWidth = width * (1 + 2 * paddingX);
+        var paddedHeight = height * (1 + 2 * paddingY);
+        var (extentWidth, extentHeight) = (turn & 1) == 0 ? (paddedWidth, paddedHeight) : (paddedHeight, paddedWidth);
         var focus = Area.Full;
         if (frame is { IsValid: true } block)
         {
@@ -963,7 +985,8 @@ public sealed partial class MainWindow : Window
         SheetExtent.Height = extentHeight * scale;
         Sheet.Width = ScanContent.Width = PageImage.Width = width * scale;
         Sheet.Height = ScanContent.Height = PageImage.Height = height * scale;
-        SheetClip.Rect = new(0, 0, Sheet.Width, Sheet.Height);
+        SheetClip.Rect = new(-paddingX * Sheet.Width, -paddingY * Sheet.Height,
+            Sheet.Width * (1 + 2 * paddingX), Sheet.Height * (1 + 2 * paddingY));
         // Keep the rotated sheet centered inside the scrollable bounds.
         Canvas.SetLeft(Sheet, (SheetExtent.Width - Sheet.Width) / 2);
         Canvas.SetTop(Sheet, (SheetExtent.Height - Sheet.Height) / 2);
@@ -1009,7 +1032,7 @@ public sealed partial class MainWindow : Window
                 result.Candidates is [{ } candidate] &&
                 (string.IsNullOrWhiteSpace(candidate.Designation) || string.IsNullOrWhiteSpace(candidate.Name))) &&
             (string.IsNullOrWhiteSpace(row.Designation) || (!row.HasDocumentName &&
-                !(row.InMergeProposal && row.SelectedCandidate?.Regions.Name.IsValid == false)));
+                row.SelectedCandidate?.Regions.Name.IsValid != false));
         ManualRegionsNotice.IsOpen = RegionControls.Visibility == Visibility.Visible &&
             RegionActions.Visibility == Visibility.Collapsed && needsFields;
         ToggleRegionsButton.Visibility = ManualRegionsNotice.IsOpen ? Visibility.Collapsed : Visibility.Visible;
@@ -1072,7 +1095,7 @@ public sealed partial class MainWindow : Window
                 : (designation.HasValue, name.HasValue) switch
                 {
                     (true, true) => "Выделены обе графы. Нажмите «Прочитать графы».",
-                    (true, false) => "Выберите «Наименование» и обведите графу.",
+                    (true, false) => "Нажмите «Прочитать графы». Если на листе есть наименование, его можно выделить дополнительно.",
                     _ => "Выберите «Обозначение» и обведите графу."
                 };
         }
@@ -1096,7 +1119,10 @@ public sealed partial class MainWindow : Window
     private void PaintRegions()
     {
         Overlays.Children.Clear();
+        CropOverlays.Children.Clear();
         if (Alignment.Crop is not null) return;
+        if (current?.PendingPageCrops.TryGetValue(page, out var crop) == true)
+            Draw(crop.Bounds.Rotate((4 - PreviewTurn) & 3), Colors.DodgerBlue, true, CropOverlays);
         var recognized = current?.SelectedCandidate;
         var fields = recognized?.Page == page ? recognized.Regions : null;
         if ((stamp ?? fields?.TitleBlock) is { } block) Draw(block, Colors.DodgerBlue, true);
@@ -1104,9 +1130,9 @@ public sealed partial class MainWindow : Window
         if ((name ?? fields?.Name) is { } second) Draw(second, Colors.MediumSeaGreen);
         if (dragStart is { } start && dragEnd is { } end) Draw(Area.Between(start, end), Colors.DodgerBlue);
 
-        void Draw(Area area, Windows.UI.Color color, bool dashed = false)
+        void Draw(Area area, Windows.UI.Color color, bool dashed = false, Canvas? canvas = null)
         {
-            if (!area.IsValid) return;
+            if (canvas is null && !area.IsValid) return;
             var rect = new Rectangle
             {
                 Width = area.Width * Sheet.Width,
@@ -1117,16 +1143,16 @@ public sealed partial class MainWindow : Window
             };
             Canvas.SetLeft(rect, area.X * Sheet.Width);
             Canvas.SetTop(rect, area.Y * Sheet.Height);
-            Overlays.Children.Add(rect);
+            (canvas ?? Overlays).Children.Add(rect);
         }
     }
 
     private async void ReadRegions(object sender, RoutedEventArgs e)
     {
-        if (!CanChangeDocuments || current is not { } row || designation is not { } first || name is not { } second) return;
+        if (!CanChangeDocuments || current is not { } row || designation is not { } first) return;
         var number = page;
         var selected = row.SelectedCandidate;
-        await ViewModel.ReadAsync(row, number, new(first, second), RegionTurn);
+        await ViewModel.ReadAsync(row, number, new(first, name ?? default), RegionTurn);
         if (current == row && page == number && !ReferenceEquals(selected, row.SelectedCandidate))
             await SelectPageAsync(number);
     }

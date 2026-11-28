@@ -21,6 +21,7 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty] public partial string SettingsMessage { get; set; } = "";
     [ObservableProperty] public partial bool ScannerWatchEnabled { get; set; }
     [ObservableProperty] public partial bool SplitScanBatches { get; set; }
+    [ObservableProperty] public partial bool AutoPrepareScans { get; set; }
     [ObservableProperty] public partial DateTimeOffset? ScannerCreatedAfter { get; set; }
     public DateTimeOffset ScannerStartDate
     {
@@ -50,7 +51,7 @@ public sealed partial class MainViewModel : ObservableObject
         return WorkAsync(async () =>
         {
             var settings = new AppSettings(ThemeIndex, SeparatorInput, OcrEnabled, Languages, TemplatePath,
-                scannerInbox?.Folder, ScannerWatchEnabled, ScannerCreatedAfter, SplitScanBatches);
+                scannerInbox?.Folder, ScannerWatchEnabled, ScannerCreatedAfter, SplitScanBatches, AutoPrepareScans);
             if (await SaveSettingsFileAsync(settings)) ReportSettings("Настройки сохранены.");
         });
     }
@@ -100,6 +101,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (settings.ScannerCreatedAfter is not null || !ScannerWatchEnabled)
             ScannerCreatedAfter = settings.ScannerCreatedAfter;
         SplitScanBatches = settings.SplitScanBatches;
+        AutoPrepareScans = settings.AutoPrepareScans;
     }
 
     private async Task<bool> SaveSettingsFileAsync(AppSettings settings)
@@ -122,6 +124,7 @@ public sealed partial class MainViewModel : ObservableObject
     partial void OnThemeIndexChanged(int value) => SettingsMessage = "";
     partial void OnOcrEnabledChanged(bool value) => SettingsMessage = "";
     partial void OnLanguagesChanged(string value) => SettingsMessage = "";
+    partial void OnAutoPrepareScansChanged(bool value) => SettingsMessage = "";
     partial void OnSplitScanBatchesChanged(bool value)
     {
         SettingsMessage = "";
@@ -268,33 +271,40 @@ public sealed partial class MainViewModel : ObservableObject
         try
         {
             var split = SplitScanBatches;
+            var autoPrepare = AutoPrepareScans;
             var cutoff = ScannerCreatedAfter?.UtcDateTime;
             var handled = split ? new Dictionary<string, ScannerInbox.FileVersion>(handledBatches, StringComparer.OrdinalIgnoreCase) : null;
-            var ignored = Rows.Where(row => split || !IsPending(row)).Select(row => row.Source)
+            var ignored = Rows.Where(row => split && !autoPrepare || !IsPending(row)).Select(row => row.Source)
                 .Concat(excludedFiles).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var paths = await Task.Run(() => inbox.FindReadyFiles(ignored, cutoff, handled));
             if (scannerUnavailable) log?.Info("Scanner", $"Folder available again. Path={inbox.Folder}");
             scannerUnavailable = false;
-            if (!CanScan() || scannerInbox != inbox || split != SplitScanBatches || cutoff != ScannerCreatedAfter?.UtcDateTime || paths.Length == 0) return;
+            if (!CanScan() || scannerInbox != inbox || split != SplitScanBatches || autoPrepare != AutoPrepareScans ||
+                cutoff != ScannerCreatedAfter?.UtcDateTime || paths.Length == 0) return;
 
             var ready = paths.Where(path => !excludedFiles.Contains(path)).ToHashSet(StringComparer.OrdinalIgnoreCase);
             log?.Info("Scanner", $"Ready files={ready.Count}; Folder={inbox.Folder}");
             if (split)
             {
+                string[] prepared = [];
                 await WorkAsync(async () =>
                 {
-                    var (prepared, warning) = await PrepareBatchFilesAsync(ready);
+                    var (pages, warning) = await PrepareBatchFilesAsync(ready);
+                    prepared = pages;
                     individualFiles.UnionWith(prepared);
                     var count = AddRows(prepared);
                     if (count > 0 || warning is not null)
                         Message = $"Добавлено: {count}. Нажмите «Распознать». {warning}".TrimEnd();
                 });
+                if (autoPrepare)
+                    await AnalyzeRowsAsync(Rows.Where(row => prepared.Contains(row.Source, StringComparer.OrdinalIgnoreCase) &&
+                        IsPending(row)).ToArray(), force: false, requireReview: true, proposeMerges: true, prepareScans: true);
                 return;
             }
             AddRows(ready);
             var batch = Rows.Where(row => ready.Contains(row.Source) && IsPending(row)).ToArray();
             individualFiles.UnionWith(batch.Select(row => row.Source));
-            await AnalyzeRowsAsync(batch, force: false, requireReview: true);
+            await AnalyzeRowsAsync(batch, force: false, requireReview: true, prepareScans: autoPrepare);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
@@ -304,7 +314,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
         finally { checkingScanner = false; }
 
-        bool CanScan() => ScannerWatchEnabled && (OcrEnabled || SplitScanBatches) && !Busy && canStart();
+        bool CanScan() => ScannerWatchEnabled && (OcrEnabled || SplitScanBatches || AutoPrepareScans) && !Busy && canStart();
         static bool IsPending(DocumentRow row) => row.Included && row.Status == "В очереди";
     }
 
@@ -659,12 +669,15 @@ public sealed partial class MainViewModel : ObservableObject
     private static bool IsPdf(string path) => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase);
 
     [RelayCommand]
-    private Task AnalyzeAsync() => AnalyzeRowsAsync(Rows.Where(r => r.Included).ToArray(), false, proposeMerges: SplitScanBatches);
+    private Task AnalyzeAsync() => AnalyzeRowsAsync(Rows.Where(r => r.Included).ToArray(), false,
+        proposeMerges: SplitScanBatches, prepareScans: AutoPrepareScans);
 
     public Task AnalyzeDocumentAsync(DocumentRow row) => Rows.Contains(row)
-        ? AnalyzeRowsAsync([row], true, proposeMerges: SplitScanBatches && row.InMergeProposal) : Task.CompletedTask;
+        ? AnalyzeRowsAsync([row], true, proposeMerges: SplitScanBatches && row.InMergeProposal,
+            prepareScans: AutoPrepareScans) : Task.CompletedTask;
 
-    private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force, bool requireReview = false, bool proposeMerges = false)
+    private async Task AnalyzeRowsAsync(DocumentRow[] batch, bool force, bool requireReview = false,
+        bool proposeMerges = false, bool prepareScans = false)
     {
         if (Busy || batch.Length == 0) return;
         log?.Info("Analysis", $"Started. Files={batch.Length}; Force={force}; OCR={OcrEnabled}; Languages={Languages}; Templates={TemplatePath ?? "built-in"}");
@@ -702,11 +715,35 @@ public sealed partial class MainViewModel : ObservableObject
                     var result = await Task.Run(() => analyzer.Analyze(row.Source,
                         options with { ReadSheetNumber = proposeMerges, DetectPageAlignment = true,
                             SavedPageAlignments = savedPageAlignments }, operation.Token));
+                    (Dictionary<int, PageAlignment> Edits, string Message)? prepared =
+                        prepareScans && result.Status != RecognitionStatus.Error && result.SourceHash is not null ? await Task.Run(() =>
+                        PrepareScanPages(row.Source, result, operation.Token), operation.Token) : null;
+                    operation.Token.ThrowIfCancellationRequested();
                     if (requireReview && result.Status == RecognitionStatus.Ready)
                         result = result with { Status = RecognitionStatus.Review, Diagnostic = "Проверьте обе графы и подтвердите значения." };
                     if (keepConfirmed && (result.SourceHash is null || result.SourceHash == row.SourceHash))
                         row.SetAvailableAlignments(result.PageAlignments);
                     else row.Apply(result);
+                    if (prepared is { } preparation)
+                    {
+                        row.PendingPageCrops.Clear();
+                        foreach (var (number, alignment) in preparation.Edits)
+                        {
+                            var leveling = alignment with { Crop = null };
+                            if (leveling == PageAlignment.Original) row.PageAlignments.Remove(number);
+                            else row.PageAlignments[number] = leveling;
+                            if (alignment.Crop is { } crop)
+                            {
+                                row.PendingPageCrops[number] = crop;
+                                if (crop.Turns == 0) row.PageRotations.Remove(number);
+                                else row.PageRotations[number] = crop.Turns;
+                            }
+                        }
+                        row.Confirmed = false;
+                        row.Status = "Проверить";
+                        row.Diagnostic = preparation.Message;
+                        row.RefreshSavedPreview();
+                    }
                     processed++;
                     Progress = 100d * (index + 1) / batch.Length;
                 }
@@ -726,6 +763,51 @@ public sealed partial class MainViewModel : ObservableObject
             cancellation = null;
             if (operation.IsCancellationRequested) RefreshMergeProposals();
         }
+    }
+
+    private (Dictionary<int, PageAlignment> Edits, string Message) PrepareScanPages(
+        string path, RecognitionResult result, CancellationToken token)
+    {
+        var edits = new Dictionary<int, PageAlignment>();
+        var cropped = 0;
+        try
+        {
+            using var input = File.OpenRead(path);
+            if (result.SourceHash is null || RenameService.Hash(input) != result.SourceHash)
+                return (edits, "PDF изменился. Распознайте его повторно.");
+            var renderer = new PdfRenderer();
+            for (var number = 1; number <= result.PageCount; number++)
+            {
+                token.ThrowIfCancellationRequested();
+                if (result.PageAlignments?.TryGetValue(number, out var alignment) != true) continue;
+                var candidates = result.Candidates.Where(candidate => candidate.Page == number).ToArray();
+                var turns = candidates.Select(candidate => candidate.Turn).Distinct().ToArray();
+                if (turns.Length > 1) continue;
+                var turn = turns.FirstOrDefault();
+                var stamp = candidates.FirstOrDefault()?.Regions.TitleBlock;
+                if (alignment.Angle != 0) edits[number] = alignment;
+                try
+                {
+                    var crop = renderer.FindPageCrop(input, number, turn, alignment, stamp, token);
+                    if (crop is null || crop.HasOutsideInk) continue;
+                    edits[number] = alignment with { Crop = crop };
+                    cropped++;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException)
+                {
+                    log?.Warning("ScanPreparation", $"Cannot crop. Source={path}; Page={number}", ex);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            log?.Warning("ScanPreparation", $"Cannot prepare. Source={path}", ex);
+            return ([], "Не удалось подготовить скан. Проверьте доступ к PDF и распознайте его повторно.");
+        }
+        var review = result.PageCount - cropped;
+        log?.Info("ScanPreparation", $"Prepared. Source={path}; Cropped={cropped}; Review={review}");
+        return (edits, $"Автоподготовка · Предложена обрезка листов: {cropped} · Проверьте обрезку вручную: {review}. " +
+            "Проверьте контур и графы. Обрезка применится после подтверждения и сохранится при переименовании или объединении.");
     }
 
     private readonly Stopwatch analysisClock = new();
@@ -788,10 +870,11 @@ public sealed partial class MainViewModel : ObservableObject
         });
     }
 
-    private static async Task<bool> ConfirmRowAsync(DocumentRow row)
+    private async Task<bool> ConfirmRowAsync(DocumentRow row)
     {
         var hash = await Task.Run(() => ReadVersion(row.Source));
-        return hash is null ? row.ObserveVersion(null) : row.Confirm(hash);
+        var namedSheet = MergeProposals.FirstOrDefault(group => group.Pages.Contains(row))?.NamedSheet;
+        return hash is null ? row.ObserveVersion(null) : row.Confirm(hash, namedSheet);
     }
 
     public async Task MoveAsync(IReadOnlyList<RenameRequest>? requests, IReadOnlyList<MoveResult>? skipped = null,
