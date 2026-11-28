@@ -991,6 +991,29 @@ public sealed class RecognitionTests : IDisposable
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(90)]
+    [InlineData(270)]
+    public void CropDoesNotMixMainFrameSidesWithTheOuterBottomRuleInADenseTable(int rotation)
+    {
+        var rows = string.Join("\n", Enumerable.Range(0, 15).Select(i =>
+            FormattableString.Invariant($"86.19 {70 + 11 * i} m 605.95 {70 + 11 * i} l S")));
+        var path = Pdf(new Page(650, 900, rotation, """
+            2 w 30 24 590 850 re S
+            1.4 w 86.19 38.31 m 86.19 859.69 l 605.95 859.69 l 605.95 38.31 l S
+            .7 w .5 G 86.19 38.31 m 605.95 38.31 l S
+            0 G 2 w
+            """ + "\n" + rows));
+        using var input = File.OpenRead(path);
+        var crop = Assert.IsType<PageCrop>(new PdfRenderer().FindPageCrop(input, 1, (4 - rotation / 90) & 3,
+            PageAlignment.Original, null, default));
+        Assert.Equal(("А4", 210, 297), (crop.Format, crop.WidthMm, crop.HeightMm));
+        Assert.InRange(crop.Bounds.X * 650, 27, 33);
+        Assert.InRange(crop.Bounds.Y * 900, 23, 29);
+        Assert.InRange(crop.Bounds.Bottom * 900, 874, 878);
+    }
+
+    [Theory]
     [InlineData(0, 0)]
     [InlineData(90, 3)]
     public void CropNormalizesPdfPaperAndMarginsAndUndoRestoresOriginal(int rotation, int turn)

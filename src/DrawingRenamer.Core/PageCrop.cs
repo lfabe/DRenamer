@@ -113,8 +113,8 @@ internal static class DrawingFrameCrop
             var stampError = stamp is { IsValid: true } block
                 ? Math.Abs(block.Right - (double)r.Position / w) + Math.Abs(block.Bottom - (double)b.Position / h) : 0;
             var stampMatches = stamp is { IsValid: true } && stampError < .025;
-            var corners = Corner(l.Position, t.Position) + Corner(r.Position, t.Position) +
-                Corner(l.Position, b.Position) + Corner(r.Position, b.Position);
+            var corners = Corner(l.Position, t.Position, 1, 1) + Corner(r.Position, t.Position, -1, 1) +
+                Corner(l.Position, b.Position, 1, -1) + Corner(r.Position, b.Position, -1, -1);
             var outerError = Math.Abs(Math.Log(format.Width / widthMm)) + Math.Abs(Math.Log(format.Height / heightMm));
             var innerError = Math.Abs(Math.Log((format.Width - 25d) / widthMm)) + Math.Abs(Math.Log((format.Height - 10d) / heightMm));
             if (corners < 3 || (outside == 0 &&
@@ -144,12 +144,27 @@ internal static class DrawingFrameCrop
             return ink[^1] - inside > Math.Max(50, .03 * ink[^1]);
         }
 
-        int Corner(int x, int y)
+        int Corner(int x, int y, int dx, int dy)
         {
-            for (var dy = -4; dy <= 4; dy++)
-            for (var dx = -4; dx <= 4; dx++)
-                if (Light(x + dx, y + dy) < 620) return 1;
-            return 0;
+            return Branch(dx, 0) && Branch(0, dy) && !Branch(0, -dy) ? 1 : 0;
+
+            bool Branch(int alongX, int alongY)
+            {
+                var hits = 0;
+                var length = Math.Clamp(Math.Min(w, h) / 80, 10, 24);
+                for (var step = 0; step < 8; step++)
+                {
+                    var distance = 3 + step * length / 7;
+                    for (var across = -3; across <= 3; across++)
+                        if (Light(x + alongX * distance - alongY * across,
+                            y + alongY * distance + alongX * across) < 620)
+                        {
+                            hits++;
+                            break;
+                        }
+                }
+                return hits >= 6;
+            }
         }
 
         (Rule[], Rule[]) FindRules(bool vertical)
@@ -177,10 +192,10 @@ internal static class DrawingFrameCrop
                 if (hits >= 63)
                     (p < depth / 2 ? first : last).Add(new(p, hits / 100d + strength / 40000d));
             }
-            return (Distinct(first), Distinct(last));
+            return (Distinct(first, true), Distinct(last, false));
 
             int At(int p, int along) => vertical ? Light(p, along) : Light(along, p);
-            static Rule[] Distinct(List<Rule> rules)
+            static Rule[] Distinct(List<Rule> rules, bool fromStart)
             {
                 var best = new List<Rule>();
                 foreach (var rule in rules.OrderByDescending(r => r.Score))
@@ -189,14 +204,16 @@ internal static class DrawingFrameCrop
                     var center = rules.Where(candidate => Math.Abs(candidate.Position - rule.Position) <= 3 &&
                         candidate.Score >= rule.Score - .025).Average(candidate => candidate.Position);
                     best.Add(rule with { Position = (int)Math.Round(center) });
-                    if (best.Count == 8) break;
                 }
-                return best.ToArray();
+                // Table rows must not displace faint frame rules nearest the paper edges.
+                var outside = fromStart ? best.OrderBy(rule => rule.Position) : best.OrderByDescending(rule => rule.Position);
+                return best.Take(8).Concat(outside.Take(8)).Distinct().ToArray();
             }
         }
 
         int Light(int x, int y)
         {
+            if ((uint)x >= (uint)w || (uint)y >= (uint)h) return 765;
             var p = 4 * (x + y * w);
             return raster.Pixels[p] + raster.Pixels[p + 1] + raster.Pixels[p + 2];
         }
